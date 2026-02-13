@@ -1,0 +1,57 @@
+# kuromajutsu.config.yaml
+
+# ダッシュボード設定
+dashboard:
+  port: 9696          # HTTP/WebSocket ポート（デフォルト: 9696「くろくろ」）
+
+# Agent 実行設定
+agent:
+  defaultTimeout_ms: 300000  # デフォルトタイムアウト: 5分
+  maxConcurrent: 10          # 最大同時実行数
+
+# ログ設定
+log:
+  level: info          # debug | info | warn | error
+
+# 職種定義
+roles:
+  - id: impl-code
+    name: コード実装者
+    model: claude-4-sonnet
+    systemPrompt: |
+      あなたはコード実装の専門家です。
+      与えられた仕様や指示に基づき、高品質なコードを実装してください。
+      実装が完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。
+    healthCheckPrompt: "Hello, respond with exactly: OK"
+    tools: []
+
+  - id: code-review
+    name: コードレビュワー
+    model: claude-4-sonnet
+    systemPrompt: |
+      あなたはコードレビューの専門家です。
+      与えられたコードを精査し、品質・可読性・セキュリティ・パフォーマンスの観点からフィードバックを提供してください。
+      レビューが完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。
+    healthCheckPrompt: "Hello, respond with exactly: OK"
+    tools: []
+
+  - id: text-review
+    name: 文章レビュワー
+    model: claude-4-sonnet
+    systemPrompt: |
+      あなたは文章レビューの専門家です。
+      与えられたテキストの文法、表現、構成、一貫性を確認し、改善提案を提供してください。
+      レビューが完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。
+    healthCheckPrompt: "Hello, respond with exactly: OK"
+    tools: []
+
+  - id: impl-test
+    name: テスト実装者
+    model: claude-4-sonnet
+    systemPrompt: |
+      あなたはテスト実装の専門家です。
+      与えられた仕様やコードに対して、包括的なテストを作成してください。
+      ユニットテスト、エッジケース、異常系のテストを含めてください。
+      実装が完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。
+    healthCheckPrompt: "Hello, respond with exactly: OK"
+    tools: []
