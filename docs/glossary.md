@@ -65,6 +65,8 @@
 | ExecutorOptions | Executor Options | `AgentExecutor.execute()` に渡すオプション型。`model`, `prompt`, `workingDirectory?`, `timeout_ms?` で構成。`src/agent/executor.ts` で定義 |
 | ExecutorCallbacks | Executor Callbacks | `AgentExecutor.execute()` に渡すコールバック群の型。`onStreamEvent`, `onExit`, `onError` の3つ。`src/agent/executor.ts` で定義 |
 | registerTools | Register Tools | 全 8 つの MCP ツールを McpServer に一括登録する関数。各ツールハンドラに AgentManager を注入する。`src/mcp/tools/index.ts` に実装 |
+| handle* 関数 | Handle Functions | 各 MCP ツールのビジネスロジックをエクスポートした関数群（`handleCreateGroup`, `handleDeleteGroup` 等）。テストから直接呼び出し可能にするため、`server.tool()` コールバックとは分離して定義。`src/mcp/tools/*.ts` に実装 |
+| errorResponse | Error Response | MCP ツールがエラーを返す際の共通ヘルパー関数。`{ content: [{ type: "text", text: JSON.stringify({ error, code, message }) }], isError: true }` 形式のレスポンスを構築する |
 
 ## UI コンポーネント
 
