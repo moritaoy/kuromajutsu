@@ -29,11 +29,13 @@ export function handleListRoles(config: AppConfig, manager: AgentManager) {
     };
   });
 
+  const availableModels = manager.getAvailableModels();
+
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify({ roles }),
+        text: JSON.stringify({ roles, availableModels }),
       },
     ],
   };

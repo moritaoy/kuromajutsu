@@ -1,0 +1,961 @@
+/* ============================================================
+   Kuromajutsu ダークテーマ（魔術的デザイン）
+   ============================================================ */
+
+:root {
+  /* 背景 */
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-card: #1c2128;
+
+  /* テキスト */
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+
+  /* アクセントカラー（魔術的な紫〜青のグラデーション） */
+  --accent-purple: #a371f7;
+  --accent-blue: #58a6ff;
+  --accent-green: #3fb950;
+  --accent-red: #f85149;
+  --accent-yellow: #d29922;
+
+  /* ステータスカラー */
+  --status-queued: #8b949e;
+  --status-running: #58a6ff;
+  --status-completed: #3fb950;
+  --status-failed: #f85149;
+  --status-timeout: #d29922;
+  --status-reported: #238636;
+
+  /* ボーダー */
+  --border: #30363d;
+  --border-hover: #484f58;
+
+  /* グラデーション */
+  --gradient-header: linear-gradient(135deg, var(--accent-purple), var(--accent-blue));
+
+  /* シャドウ */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-elevated: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+/* ============================================================
+   リセット & ベース
+   ============================================================ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent-blue);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+/* ============================================================
+   ヘッダー
+   ============================================================ */
+
+.header {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header-title {
+  font-size: 20px;
+  font-weight: 700;
+  background: var(--gradient-header);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.connection-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
+.connection-indicator.connected {
+  background: var(--accent-green);
+  box-shadow: 0 0 6px var(--accent-green);
+}
+
+.connection-indicator.disconnected {
+  background: var(--accent-red);
+  box-shadow: 0 0 6px var(--accent-red);
+}
+
+.connection-indicator.connecting {
+  background: var(--accent-yellow);
+  animation: blink 1.5s ease-in-out infinite;
+}
+
+/* ============================================================
+   ナビゲーション
+   ============================================================ */
+
+.nav {
+  display: flex;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  gap: 0;
+}
+
+.nav-item {
+  padding: 10px 20px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.2s, border-color 0.2s;
+  user-select: none;
+}
+
+.nav-item:hover {
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  color: var(--accent-purple);
+  border-bottom-color: var(--accent-purple);
+}
+
+/* ============================================================
+   メインコンテンツ
+   ============================================================ */
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.page-title {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 20px;
+}
+
+/* ============================================================
+   グループセクション
+   ============================================================ */
+
+.group-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.group-header {
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s;
+}
+
+.group-header:hover {
+  background: var(--bg-card);
+}
+
+.group-chevron {
+  font-size: 12px;
+  color: var(--text-secondary);
+  transition: transform 0.2s;
+}
+
+.group-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.group-id {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+  color: var(--accent-purple);
+}
+
+.group-description {
+  font-size: 14px;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.group-stats {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.group-progress {
+  width: 80px;
+  height: 4px;
+  background: var(--bg-primary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.group-progress-bar {
+  height: 100%;
+  background: var(--accent-green);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.group-body {
+  padding: 12px 20px 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+/* ============================================================
+   Agent カード
+   ============================================================ */
+
+.agent-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  border-left: 4px solid var(--status-queued);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.agent-card:hover {
+  box-shadow: var(--shadow-elevated);
+  border-color: var(--border-hover);
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-id {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-card-body {
+  font-size: 13px;
+}
+
+.agent-elapsed {
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 14px;
+}
+
+/* 職種バッジ */
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  background: rgba(163, 113, 247, 0.15);
+  color: var(--accent-purple);
+  border: 1px solid rgba(163, 113, 247, 0.3);
+  white-space: nowrap;
+}
+
+.role-badge-impl-code {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent-blue);
+  border-color: rgba(88, 166, 255, 0.3);
+}
+
+.role-badge-code-review {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--accent-green);
+  border-color: rgba(63, 185, 80, 0.3);
+}
+
+.role-badge-text-review {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--accent-yellow);
+  border-color: rgba(210, 153, 34, 0.3);
+}
+
+.role-badge-impl-test {
+  background: rgba(163, 113, 247, 0.15);
+  color: var(--accent-purple);
+  border-color: rgba(163, 113, 247, 0.3);
+}
+
+/* ============================================================
+   モーダル（Agent 詳細ポップアップ）
+   ============================================================ */
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.15s ease-out;
+}
+
+.modal-content {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  width: 90%;
+  max-width: 640px;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  animation: fadeIn 0.2s ease-out;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.modal-agent-id {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 14px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.2s, color 0.2s;
+  flex-shrink: 0;
+}
+
+.modal-close:hover {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.modal-section {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-section:last-child {
+  border-bottom: none;
+}
+
+.modal-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.modal-section-body {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.modal-prompt {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+}
+
+.modal-summary {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+/* ステータス別のカード色 */
+.agent-card.status-queued { border-left-color: var(--status-queued); }
+.agent-card.status-running { border-left-color: var(--status-running); }
+.agent-card.status-completed { border-left-color: var(--status-completed); }
+.agent-card.status-failed { border-left-color: var(--status-failed); }
+.agent-card.status-timedOut { border-left-color: var(--status-timeout); }
+.agent-card.status-resultReported { border-left-color: var(--status-reported); }
+
+.status-dot.queued { background: var(--status-queued); }
+.status-dot.running { background: var(--status-running); }
+.status-dot.completed { background: var(--status-completed); }
+.status-dot.failed { background: var(--status-failed); }
+.status-dot.timedOut { background: var(--status-timeout); }
+.status-dot.resultReported { background: var(--status-reported); }
+
+/* ============================================================
+   ヘルスチェック状況
+   ============================================================ */
+
+.health-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.health-step-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--accent-purple);
+}
+
+.health-role-list {
+  list-style: none;
+  padding-left: 16px;
+}
+
+.health-role-item {
+  padding: 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  border-left: 2px solid var(--border);
+  padding-left: 16px;
+  margin-left: 4px;
+}
+
+.health-role-item:last-child {
+  border-left-color: transparent;
+}
+
+.health-role-name {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+}
+
+.health-role-model {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.health-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.health-icon.valid { color: var(--accent-green); }
+.health-icon.invalid { color: var(--accent-red); }
+.health-icon.checking { color: var(--accent-blue); }
+.health-icon.waiting { color: var(--text-muted); }
+.health-icon.passed { color: var(--accent-green); }
+.health-icon.failed { color: var(--accent-red); }
+.health-icon.skipped { color: var(--text-muted); }
+
+.health-response-time {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.health-summary {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+/* ============================================================
+   職種管理
+   ============================================================ */
+
+.role-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.role-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.role-id {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 14px;
+  color: var(--accent-purple);
+}
+
+.role-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.role-availability {
+  margin-left: auto;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.role-availability.available {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--accent-green);
+}
+
+.role-availability.unavailable {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--accent-red);
+}
+
+.role-field {
+  margin-bottom: 14px;
+}
+
+.role-field-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.role-field select,
+.role-field input,
+.role-field textarea {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.role-field select:focus,
+.role-field input:focus,
+.role-field textarea:focus {
+  border-color: var(--accent-purple);
+}
+
+.role-field textarea {
+  min-height: 80px;
+  resize: vertical;
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+}
+
+.role-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* ============================================================
+   実行履歴テーブル
+   ============================================================ */
+
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.filter-bar select {
+  padding: 6px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.history-table th {
+  padding: 12px 16px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+
+.history-table td {
+  padding: 10px 16px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-table tr:last-child td {
+  border-bottom: none;
+}
+
+.history-table tr:hover td {
+  background: var(--bg-card);
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-badge.success {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--accent-green);
+}
+
+.status-badge.failure {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--accent-red);
+}
+
+.status-badge.timeout {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--accent-yellow);
+}
+
+.status-badge.cancelled {
+  background: rgba(139, 148, 158, 0.15);
+  color: var(--text-secondary);
+}
+
+/* ============================================================
+   ボタン
+   ============================================================ */
+
+.btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--border-hover);
+}
+
+.btn-primary {
+  background: var(--accent-purple);
+  border-color: var(--accent-purple);
+  color: white;
+}
+
+.btn-primary:hover {
+  background: #9061e0;
+  border-color: #9061e0;
+}
+
+/* ============================================================
+   空状態
+   ============================================================ */
+
+.empty-state {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-secondary);
+}
+
+.empty-state-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.empty-state-text {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.empty-state-subtext {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   情報画面（Info）
+   ============================================================ */
+
+.info-section {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.info-section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent-purple);
+  margin-bottom: 8px;
+}
+
+.info-description {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.inline-code {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--accent-blue);
+}
+
+.model-count {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  display: inline-block;
+}
+
+.model-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.model-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.model-item:hover {
+  border-color: var(--accent-purple);
+  box-shadow: 0 0 0 1px var(--accent-purple);
+}
+
+.model-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.model-name {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 14px;
+  color: var(--text-primary);
+  user-select: all;
+}
+
+/* ============================================================
+   アニメーション
+   ============================================================ */
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(88, 166, 255, 0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-blink {
+  animation: blink 1.5s ease-in-out infinite;
+}
+
+.animate-pulse {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-in;
+}
+
+.animate-shake {
+  animation: shake 0.5s ease-in-out;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* ステータス別のカードアニメーション */
+.agent-card.status-queued {
+  animation: blink 1.5s ease-in-out infinite;
+}
+
+.agent-card.status-running {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.agent-card.status-completed {
+  animation: fadeIn 0.5s ease-in;
+}
+
+.agent-card.status-failed {
+  animation: shake 0.5s ease-in-out;
+}
+
+.agent-card.status-timedOut .health-icon {
+  animation: blink 1s ease-in-out infinite;
+}
+
+/* ============================================================
+   レスポンシブ
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .container {
+    padding: 16px;
+  }
+
+  .group-body {
+    grid-template-columns: 1fr;
+  }
+
+  .nav {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .filter-bar {
+    flex-direction: column;
+  }
+
+  .history-table {
+    font-size: 12px;
+  }
+}

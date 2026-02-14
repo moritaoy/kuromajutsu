@@ -64,6 +64,7 @@
 | FileChanges | File Changes | `StreamJsonParser.extractFileChanges()` が返すオブジェクト型。`editedFiles` と `createdFiles` の文字列配列を持つ |
 | ExecutorOptions | Executor Options | `AgentExecutor.execute()` に渡すオプション型。`model`, `prompt`, `workingDirectory?`, `timeout_ms?` で構成。`src/agent/executor.ts` で定義 |
 | ExecutorCallbacks | Executor Callbacks | `AgentExecutor.execute()` に渡すコールバック群の型。`onStreamEvent`, `onExit`, `onError` の3つ。`src/agent/executor.ts` で定義 |
+| availableModels | Available Models | ヘルスチェック時に `agent models` コマンドで取得した、Cursor で利用可能なモデル名の一覧。AgentManager に保持され、`list_roles` レスポンスのトップレベルフィールドとして返却される |
 | registerTools | Register Tools | 全 8 つの MCP ツールを McpServer に一括登録する関数。各ツールハンドラに AgentManager を注入する。`src/mcp/tools/index.ts` に実装 |
 | handle* 関数 | Handle Functions | 各 MCP ツールのビジネスロジックをエクスポートした関数群（`handleCreateGroup`, `handleDeleteGroup` 等）。テストから直接呼び出し可能にするため、`server.tool()` コールバックとは分離して定義。`src/mcp/tools/*.ts` に実装 |
 | errorResponse | Error Response | MCP ツールがエラーを返す際の共通ヘルパー関数。`{ content: [{ type: "text", text: JSON.stringify({ error, code, message }) }], isError: true }` 形式のレスポンスを構築する |
@@ -81,7 +82,31 @@
 | RoleEditor | Role Editor | 職種の設定（モデル、システムプロンプト等）をインライン編集する React コンポーネント。変更を YAML ファイルに反映する |
 | HistoryTable | History Table | 完了した Agent の実行結果を一覧表示するテーブル型 React コンポーネント。グループ・ステータス・職種でフィルタリング可能 |
 | HealthStatus | Health Status | 起動時ヘルスチェックの進行状況をステップ形式でリアルタイム表示する React コンポーネント |
+| ModelList | Model List | 利用可能モデル一覧を表示する React コンポーネント。Info 画面で使用し、職種登録時のモデル名確認に利用する |
+| InfoPage | Info Page | システム情報画面。利用可能モデル一覧など、サーバー環境の情報を表示する |
 | Layout | Layout | ヘッダー・ナビゲーション・コンテンツエリアを持つ共通レイアウト React コンポーネント |
+
+## ダッシュボードサーバー
+
+| 用語 | 英語表記 | 定義 |
+|------|---------|------|
+| startDashboardServer | Start Dashboard Server | HTTP サーバーと WebSocket サーバーを同一ポートで起動する関数。`config` と `manager` を引数に取り、静的ファイル配信・SPA フォールバック・WebSocket ブロードキャストを提供する。`src/dashboard/server.ts` に実装 |
+| WebSocketServer | WebSocket Server | `ws` パッケージの WebSocketServer クラス。HTTP サーバーと同ポートで動作し、ダッシュボード UI とリアルタイム双方向通信を行う |
+| sendInitialState | Send Initial State | 新しい WebSocket クライアントが接続した際に、現在のサーバー状態（起動通知・ヘルスチェック結果・グループ・Agent 一覧）をスナップショットとして送信する関数 |
+| handleClientEvent | Handle Client Event | クライアントから受信した WebSocket イベント（`config:update_role`, `config:revalidate_model`）を処理し、設定変更を YAML ファイルに反映する関数 |
+| setupBroadcast | Setup Broadcast | AgentManager の全イベントをリッスンし、接続中の全 WebSocket クライアントに ServerEvent として中継するセットアップ関数 |
+| ServerEvent | Server Event | サーバーからクライアントへ送信される WebSocket イベントの型定義。`server:startup`, `healthcheck:*`, `group:*`, `agent:*`, `config:updated` の12種類。`src/types/index.ts` で定義 |
+| ClientEvent | Client Event | クライアントからサーバーへ送信される WebSocket イベントの型定義。`config:update_role`, `config:revalidate_model` の2種類。`src/types/index.ts` で定義 |
+| listGroups | List Groups | AgentManager が管理する全グループ一覧を配列で返すメソッド。WebSocket 接続時の初期状態送信に使用 |
+
+## React SPA フック
+
+| 用語 | 英語表記 | 定義 |
+|------|---------|------|
+| useWebSocket | Use WebSocket Hook | WebSocket 接続の確立・自動再接続・メッセージ送受信を管理する React フック。指数バックオフ（1s→2s→4s→max 30s）による自動再接続機能を持つ。`src/dashboard/public/hooks/useWebSocket.js` に実装 |
+| useAgentStore | Use Agent Store Hook | `useReducer` で全アプリケーション状態（Group, Agent, HealthCheck, Config）を管理する React フック。ServerEvent を受けて状態を更新する Reducer を内包する。`src/dashboard/public/hooks/useAgentStore.js` に実装 |
+| importmap | Import Map | `<script type="importmap">` で React / ReactDOM の CDN URL をモジュール名にマッピングする仕組み。ビルドステップなしで ES Module ベースの React SPA を実現する |
+| ハッシュベースルーティング | Hash-Based Routing | URL のハッシュ部分（`#/`, `#/roles`, `#/history`, `#/health`）でページ遷移を行う SPA ルーティング方式。サーバー側の設定不要でクライアントのみで完結する |
 
 ## 設計パターン・概念
 

@@ -23,72 +23,93 @@ function collectEvents(parser: StreamJsonParser, data: string): Promise<StreamEv
 
 describe("StreamJsonParser", () => {
   // --------------------------------------------------
-  // 正常系: 各イベントタイプのパース
+  // 正常系: 各イベントタイプのパース（実際の Cursor CLI 出力形式）
   // --------------------------------------------------
 
   it("system init イベントをパースできる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"system","subtype":"init","data":{"model":"claude-4-sonnet","session_id":"abc123"}}\n';
+    const data = '{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/home/user/project","session_id":"abc123","model":"Composer 1.5","permissionMode":"default"}\n';
 
     const events = await collectEvents(parser, data);
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("system");
     expect(events[0].subtype).toBe("init");
-    expect(events[0].data.model).toBe("claude-4-sonnet");
+    expect(events[0].data.model).toBe("Composer 1.5");
     expect(events[0].data.session_id).toBe("abc123");
   });
 
   it("user イベントをパースできる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"user","data":{"message":"Hello world"}}\n';
+    const data = '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello world"}]},"session_id":"abc123"}\n';
 
     const events = await collectEvents(parser, data);
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("user");
-    expect(events[0].data.message).toBe("Hello world");
+    const message = events[0].data.message as { content: Array<{ text: string }> };
+    expect(message.content[0].text).toBe("Hello world");
   });
 
   it("assistant イベントをパースできる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"assistant","data":{"message":"I will help you."}}\n';
+    const data = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will help you."}]},"session_id":"abc123"}\n';
 
     const events = await collectEvents(parser, data);
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("assistant");
-    expect(events[0].data.message).toBe("I will help you.");
+    const message = events[0].data.message as { content: Array<{ text: string }> };
+    expect(message.content[0].text).toBe("I will help you.");
+  });
+
+  it("thinking イベントをパースできる", async () => {
+    const parser = new StreamJsonParser();
+    const data = [
+      '{"type":"thinking","subtype":"delta","text":"考え中...","session_id":"abc123","timestamp_ms":1700000000000}',
+      '{"type":"thinking","subtype":"completed","session_id":"abc123","timestamp_ms":1700000000100}',
+    ].join("\n") + "\n";
+
+    const events = await collectEvents(parser, data);
+
+    expect(events).toHaveLength(2);
+    expect(events[0].type).toBe("thinking");
+    expect(events[0].subtype).toBe("delta");
+    expect(events[0].data.text).toBe("考え中...");
+    expect(events[1].subtype).toBe("completed");
   });
 
   it("tool_call started イベントをパースできる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"tool_call","subtype":"started","data":{"callId":"call-1","toolName":"read","args":{"path":"src/index.ts"}}}\n';
+    const data = '{"type":"tool_call","subtype":"started","call_id":"tool_abc123","tool_call":{"editToolCall":{"args":{"path":"src/index.ts","streamContent":"console.log()"}}},"session_id":"s1"}\n';
 
     const events = await collectEvents(parser, data);
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("tool_call");
     expect(events[0].subtype).toBe("started");
-    expect(events[0].data.callId).toBe("call-1");
-    expect(events[0].data.toolName).toBe("read");
+    expect(events[0].data.call_id).toBe("tool_abc123");
+    const toolCall = events[0].data.tool_call as Record<string, Record<string, unknown>>;
+    expect(toolCall.editToolCall).toBeDefined();
   });
 
   it("tool_call completed イベントをパースできる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"tool_call","subtype":"completed","data":{"callId":"call-1","toolName":"write","args":{"path":"src/foo.ts"}}}\n';
+    const data = '{"type":"tool_call","subtype":"completed","call_id":"tool_abc123","tool_call":{"editToolCall":{"args":{"path":"src/foo.ts","streamContent":"test"},"result":{"success":{"path":"src/foo.ts","linesAdded":1,"linesRemoved":0}}}},"session_id":"s1"}\n';
 
     const events = await collectEvents(parser, data);
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("tool_call");
     expect(events[0].subtype).toBe("completed");
-    expect(events[0].data.toolName).toBe("write");
+    const toolCall = events[0].data.tool_call as Record<string, Record<string, unknown>>;
+    const editToolCall = toolCall.editToolCall as { result: { success: { path: string } } };
+    expect(editToolCall.result.success.path).toBe("src/foo.ts");
   });
 
   it("result success イベントをパースできる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"result","subtype":"success","data":{"duration_ms":5000,"message":"Done"}}\n';
+    const data = '{"type":"result","subtype":"success","duration_ms":5000,"duration_api_ms":5000,"is_error":false,"result":"Done","session_id":"s1"}\n';
 
     const events = await collectEvents(parser, data);
 
@@ -105,10 +126,10 @@ describe("StreamJsonParser", () => {
   it("複数行の NDJSON を一度にパースできる", async () => {
     const parser = new StreamJsonParser();
     const data = [
-      '{"type":"system","subtype":"init","data":{"model":"claude-4-sonnet","session_id":"s1"}}',
-      '{"type":"user","data":{"message":"Hello"}}',
-      '{"type":"assistant","data":{"message":"Hi"}}',
-      '{"type":"result","subtype":"success","data":{"duration_ms":1000}}',
+      '{"type":"system","subtype":"init","model":"Composer 1.5","session_id":"s1"}',
+      '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello"}]},"session_id":"s1"}',
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hi"}]},"session_id":"s1"}',
+      '{"type":"result","subtype":"success","duration_ms":1000,"session_id":"s1"}',
     ].join("\n") + "\n";
 
     const events = await collectEvents(parser, data);
@@ -129,7 +150,7 @@ describe("StreamJsonParser", () => {
     const events: StreamEvent[] = [];
     parser.on("event", (event: StreamEvent) => events.push(event));
 
-    const fullLine = '{"type":"system","subtype":"init","data":{"model":"claude-4-sonnet","session_id":"s1"}}';
+    const fullLine = '{"type":"system","subtype":"init","model":"Composer 1.5","session_id":"s1"}';
 
     // 行を中途半端な位置で分割して流す
     const mid = Math.floor(fullLine.length / 2);
@@ -146,7 +167,36 @@ describe("StreamJsonParser", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("system");
-    expect(events[0].data.model).toBe("claude-4-sonnet");
+    expect(events[0].data.model).toBe("Composer 1.5");
+  });
+
+  it("マルチバイト文字がチャンク境界で分割されても正しく処理する", async () => {
+    const parser = new StreamJsonParser();
+    const events: StreamEvent[] = [];
+    parser.on("event", (event: StreamEvent) => events.push(event));
+
+    const fullLine = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"日本語テスト"}]}}\n';
+    const buf = Buffer.from(fullLine, "utf8");
+
+    // マルチバイト文字の途中で分割（日本語は3バイト/文字）
+    // "日" は E6 97 A5 の3バイト。途中で切る
+    const splitPoint = buf.indexOf(Buffer.from("日", "utf8")) + 1; // 1バイト目の後で切る
+
+    const chunk1 = buf.subarray(0, splitPoint);
+    const chunk2 = buf.subarray(splitPoint);
+
+    await new Promise<void>((resolve) => {
+      parser.write(chunk1, () => {
+        parser.write(chunk2, () => {
+          parser.end(() => resolve());
+        });
+      });
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("assistant");
+    const message = events[0].data.message as { content: Array<{ text: string }> };
+    expect(message.content[0].text).toBe("日本語テスト");
   });
 
   // --------------------------------------------------
@@ -156,7 +206,7 @@ describe("StreamJsonParser", () => {
   it("最後の改行なしデータも flush 時にパースする", async () => {
     const parser = new StreamJsonParser();
     // 改行なしで終わるデータ
-    const data = '{"type":"result","subtype":"success","data":{"duration_ms":999}}';
+    const data = '{"type":"result","subtype":"success","duration_ms":999,"session_id":"s1"}';
 
     const events = await collectEvents(parser, data);
 
@@ -174,9 +224,9 @@ describe("StreamJsonParser", () => {
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const data = [
-      '{"type":"system","subtype":"init","data":{"model":"m1","session_id":"s1"}}',
+      '{"type":"system","subtype":"init","model":"m1","session_id":"s1"}',
       "this is not json",
-      '{"type":"result","subtype":"success","data":{"duration_ms":100}}',
+      '{"type":"result","subtype":"success","duration_ms":100,"session_id":"s1"}',
     ].join("\n") + "\n";
 
     const events = await collectEvents(parser, data);
@@ -191,7 +241,7 @@ describe("StreamJsonParser", () => {
 
   it("空行をスキップする", async () => {
     const parser = new StreamJsonParser();
-    const data = '\n\n{"type":"user","data":{"message":"hello"}}\n\n';
+    const data = '\n\n{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]},"session_id":"s1"}\n\n';
 
     const events = await collectEvents(parser, data);
 
@@ -200,34 +250,34 @@ describe("StreamJsonParser", () => {
   });
 
   // --------------------------------------------------
-  // writeToolCall 検出
+  // editToolCall によるファイル変更検出
   // --------------------------------------------------
 
-  it("write ツール呼び出しから createdFiles を抽出できる", async () => {
+  it("editToolCall completed から editedFiles を抽出できる", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"tool_call","subtype":"completed","data":{"callId":"c1","toolName":"write","args":{"path":"src/new-file.ts"}}}\n';
+    const data = '{"type":"tool_call","subtype":"completed","call_id":"c1","tool_call":{"editToolCall":{"args":{"path":"src/new-file.ts","streamContent":"test"},"result":{"success":{"path":"src/new-file.ts","linesAdded":5,"linesRemoved":0}}}},"session_id":"s1"}\n';
 
     const events = await collectEvents(parser, data);
 
     const fileChanges = parser.extractFileChanges(events[0]);
-    expect(fileChanges.createdFiles).toContain("src/new-file.ts");
-    expect(fileChanges.editedFiles).toHaveLength(0);
-  });
-
-  it("edit ツール呼び出しから editedFiles を抽出できる", async () => {
-    const parser = new StreamJsonParser();
-    const data = '{"type":"tool_call","subtype":"completed","data":{"callId":"c2","toolName":"edit","args":{"path":"src/existing.ts"}}}\n';
-
-    const events = await collectEvents(parser, data);
-
-    const fileChanges = parser.extractFileChanges(events[0]);
-    expect(fileChanges.editedFiles).toContain("src/existing.ts");
+    expect(fileChanges.editedFiles).toContain("src/new-file.ts");
     expect(fileChanges.createdFiles).toHaveLength(0);
   });
 
-  it("非ファイル操作ツールでは空配列を返す", async () => {
+  it("readToolCall など非編集ツールでは空配列を返す", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"tool_call","subtype":"completed","data":{"callId":"c3","toolName":"read","args":{"path":"src/foo.ts"}}}\n';
+    const data = '{"type":"tool_call","subtype":"completed","call_id":"c3","tool_call":{"readToolCall":{"args":{"path":"src/foo.ts"},"result":{"success":{"content":"file content"}}}},"session_id":"s1"}\n';
+
+    const events = await collectEvents(parser, data);
+
+    const fileChanges = parser.extractFileChanges(events[0]);
+    expect(fileChanges.editedFiles).toHaveLength(0);
+    expect(fileChanges.createdFiles).toHaveLength(0);
+  });
+
+  it("tool_call のない イベントでは空配列を返す", async () => {
+    const parser = new StreamJsonParser();
+    const data = '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]},"session_id":"s1"}\n';
 
     const events = await collectEvents(parser, data);
 
@@ -242,7 +292,7 @@ describe("StreamJsonParser", () => {
 
   it("readable ストリームとしてオブジェクトを push する", async () => {
     const parser = new StreamJsonParser();
-    const data = '{"type":"user","data":{"message":"test"}}\n';
+    const data = '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"test"}]},"session_id":"s1"}\n';
 
     const objects: StreamEvent[] = [];
     parser.on("data", (obj: StreamEvent) => objects.push(obj));
@@ -255,5 +305,21 @@ describe("StreamJsonParser", () => {
 
     expect(objects).toHaveLength(1);
     expect(objects[0].type).toBe("user");
+  });
+
+  // --------------------------------------------------
+  // イベント正規化
+  // --------------------------------------------------
+
+  it("data フィールドにパース済み JSON 全体が格納される", async () => {
+    const parser = new StreamJsonParser();
+    const data = '{"type":"result","subtype":"success","duration_ms":5000,"is_error":false,"result":"Done","session_id":"s1"}\n';
+
+    const events = await collectEvents(parser, data);
+
+    expect(events[0].data.type).toBe("result");
+    expect(events[0].data.duration_ms).toBe(5000);
+    expect(events[0].data.is_error).toBe(false);
+    expect(events[0].data.result).toBe("Done");
   });
 });

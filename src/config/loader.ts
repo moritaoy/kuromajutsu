@@ -13,7 +13,6 @@ const DEFAULTS: AppConfig = {
     port: 9696,
   },
   agent: {
-    defaultTimeout_ms: 300_000,
     maxConcurrent: 10,
   },
   log: {

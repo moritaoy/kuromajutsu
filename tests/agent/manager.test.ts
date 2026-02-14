@@ -118,6 +118,43 @@ describe("AgentManager — Group 管理", () => {
 
     expect(handler).toHaveBeenCalledWith({ groupId: group.id });
   });
+
+  it("グループ削除時にグループに属する Agent も削除される", () => {
+    const config = createTestConfig();
+    const mgr = new AgentManager(config);
+    const group = mgr.createGroup("test");
+    const a1 = mgr.startAgent(group.id, config.roles[0], "test1");
+    const a2 = mgr.startAgent(group.id, config.roles[1], "test2");
+
+    // 削除前: Agent が存在する
+    expect(mgr.getAgent(a1.agentId)).toBeDefined();
+    expect(mgr.getAgent(a2.agentId)).toBeDefined();
+    expect(mgr.listAgents()).toHaveLength(2);
+
+    mgr.deleteGroup(group.id);
+
+    // 削除後: Agent も削除される
+    expect(mgr.getAgent(a1.agentId)).toBeUndefined();
+    expect(mgr.getAgent(a2.agentId)).toBeUndefined();
+    expect(mgr.listAgents()).toHaveLength(0);
+  });
+
+  it("グループ削除時に他のグループの Agent は影響を受けない", () => {
+    const config = createTestConfig();
+    const mgr = new AgentManager(config);
+    const group1 = mgr.createGroup("group1");
+    const group2 = mgr.createGroup("group2");
+    const a1 = mgr.startAgent(group1.id, config.roles[0], "test1");
+    const a2 = mgr.startAgent(group2.id, config.roles[1], "test2");
+
+    mgr.deleteGroup(group1.id);
+
+    // group1 の Agent は削除される
+    expect(mgr.getAgent(a1.agentId)).toBeUndefined();
+    // group2 の Agent は残る
+    expect(mgr.getAgent(a2.agentId)).toBeDefined();
+    expect(mgr.listAgents()).toHaveLength(1);
+  });
 });
 
 // ==================================================
@@ -150,6 +187,36 @@ describe("AgentManager — Agent 基本管理", () => {
     expect(agent.recentToolCalls).toEqual([]);
     expect(agent.editedFiles).toEqual([]);
     expect(agent.createdFiles).toEqual([]);
+  });
+
+  it("Agent 起動時にユーザープロンプトが保存される", () => {
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(
+      group.id,
+      config.roles[0],
+      "hoge1.md を編集してください",
+    );
+
+    expect(agent.prompt).toBe("hoge1.md を編集してください");
+  });
+
+  it("Agent の prompt が WebSocket 経由で配信される（agent:created イベント）", () => {
+    const handler = vi.fn();
+    manager.on("agent:created", handler);
+
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(
+      group.id,
+      config.roles[0],
+      "テストプロンプト内容",
+    );
+
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: agent.agentId,
+        prompt: "テストプロンプト内容",
+      }),
+    );
   });
 
   it("Agent 起動でグループの agentIds に追加される", () => {
@@ -587,16 +654,36 @@ describe("AgentManager — reportResult", () => {
     ).toThrow();
   });
 
-  it("queued/running の Agent への reportResult はエラー", () => {
+  it("queued の Agent への reportResult はエラー", () => {
     const group = manager.createGroup("test");
     const agent = manager.startAgent(group.id, config.roles[0], "test");
 
+    // queued 状態ではエラー（mockExecutor により status は queued のまま）
     expect(() =>
       manager.reportResult(agent.agentId, {
         status: "success",
         summary: "done",
       }),
     ).toThrow();
+  });
+
+  it("running の Agent への reportResult は受け付ける（Agent 自身が実行中に MCP 経由で呼ぶケース）", () => {
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(group.id, config.roles[0], "test");
+
+    // running 状態に遷移
+    manager.updateAgentState(agent.agentId, { status: "running" });
+
+    // running 状態で report_result を呼べる
+    const result = manager.reportResult(agent.agentId, {
+      status: "success",
+      summary: "Agent 自身が実行中に報告",
+    });
+
+    expect(result.agentId).toBe(agent.agentId);
+    expect(result.status).toBe("success");
+    expect(result.summary).toBe("Agent 自身が実行中に報告");
+    expect(manager.getAgent(agent.agentId)!.status).toBe("resultReported");
   });
 
   it("結果登録時に agent:result_reported イベントが emit される", () => {
@@ -615,6 +702,94 @@ describe("AgentManager — reportResult", () => {
     });
 
     expect(handler).toHaveBeenCalledWith(result);
+  });
+});
+
+// ==================================================
+// buildFullPrompt テスト
+// ==================================================
+
+describe("AgentManager — buildFullPrompt", () => {
+  let manager: AgentManager;
+  let config: AppConfig;
+
+  beforeEach(() => {
+    config = createTestConfig();
+    manager = new AgentManager(config);
+  });
+
+  it("プロンプトに agentId が注入される", () => {
+    const role = config.roles[0];
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-123-abcd", "テスト");
+
+    expect(prompt).toContain("impl-code-123-abcd");
+  });
+
+  it("プロンプトに groupId が注入される", () => {
+    const role = config.roles[0];
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-456-efgh", "テスト");
+
+    expect(prompt).toContain("grp-456-efgh");
+  });
+
+  it("プロンプトに role.id が注入される", () => {
+    const role = config.roles[0];
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-123-abcd", "テスト");
+
+    expect(prompt).toContain("Role: impl-code");
+  });
+
+  it("プロンプトに report_result の呼び出し指示が含まれる", () => {
+    const role = config.roles[0];
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-123-abcd", "テスト");
+
+    expect(prompt).toContain("report_result");
+    expect(prompt).toContain('agentId: "impl-code-123-abcd"');
+  });
+
+  it("プロンプトにロールの systemPrompt が含まれる", () => {
+    const role = config.roles[0];
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-123-abcd", "テスト");
+
+    expect(prompt).toContain(role.systemPrompt);
+  });
+
+  it("プロンプトにユーザープロンプトが含まれる", () => {
+    const role = config.roles[0];
+    const userPrompt = "src/index.ts を修正してください";
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-123-abcd", userPrompt);
+
+    expect(prompt).toContain(userPrompt);
+  });
+
+  it("プロンプトの構造: systemPrompt → メタデータブロック → userPrompt の順", () => {
+    const role = config.roles[0];
+    const userPrompt = "ユーザータスク指示";
+    const prompt = manager.buildFullPrompt(role, "impl-code-123-abcd", "grp-123-abcd", userPrompt);
+
+    const systemPromptIdx = prompt.indexOf(role.systemPrompt);
+    const metadataIdx = prompt.indexOf("kuromajutsu システム情報");
+    const userPromptIdx = prompt.indexOf(userPrompt);
+
+    expect(systemPromptIdx).toBeLessThan(metadataIdx);
+    expect(metadataIdx).toBeLessThan(userPromptIdx);
+  });
+
+  it("Agent 起動時に executor に渡されるプロンプトにメタデータが含まれる", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockExecute = (manager as any).executor.execute as ReturnType<typeof vi.fn>;
+
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(group.id, config.roles[0], "Hello world");
+
+    // executor.execute の第2引数（options）の prompt を検証
+    const lastCall = mockExecute.mock.calls[mockExecute.mock.calls.length - 1];
+    const options = lastCall[1];
+    expect(options.prompt).toContain(agent.agentId);
+    expect(options.prompt).toContain(group.id);
+    expect(options.prompt).toContain("report_result");
+    expect(options.prompt).toContain("Hello world");
+    expect(options.prompt).toContain("kuromajutsu システム情報");
   });
 });
 
@@ -644,6 +819,17 @@ describe("AgentManager — ヘルスチェック結果管理", () => {
     const fetched = manager.getHealthCheckResult("impl-code");
     expect(fetched).toBeDefined();
     expect(fetched!.available).toBe(true);
+  });
+
+  it("利用可能モデル一覧を設定・取得できる", () => {
+    const models = ["claude-4-sonnet", "claude-4-opus", "gpt-4o"];
+    manager.setAvailableModels(models);
+
+    expect(manager.getAvailableModels()).toEqual(models);
+  });
+
+  it("利用可能モデル一覧の初期値は空配列", () => {
+    expect(manager.getAvailableModels()).toEqual([]);
   });
 
   it("全ヘルスチェック結果を取得できる", () => {

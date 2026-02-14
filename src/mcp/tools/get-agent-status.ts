@@ -50,6 +50,8 @@ export function handleGetAgentStatus(
           toolCallCount: agent.toolCallCount,
           lastAssistantMessage: agent.lastAssistantMessage ?? null,
           recentToolCalls: agent.recentToolCalls,
+          editedFiles: agent.editedFiles,
+          createdFiles: agent.createdFiles,
           result: agent.result,
         }),
       },

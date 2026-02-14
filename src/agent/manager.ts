@@ -20,6 +20,7 @@ import type {
   RoleDefinition,
 } from "../types/index.js";
 import { AgentExecutor } from "./executor.js";
+import { buildToolPromptBlock } from "./tools.js";
 
 // --------------------------------------------------
 // 許可される状態遷移マップ
@@ -27,7 +28,7 @@ import { AgentExecutor } from "./executor.js";
 
 const VALID_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
   queued: ["running", "failed"],
-  running: ["completed", "failed", "timedOut"],
+  running: ["completed", "failed", "timedOut", "resultReported"],
   completed: ["resultReported"],
   failed: ["resultReported"],
   timedOut: ["resultReported"],
@@ -60,6 +61,9 @@ export class AgentManager extends EventEmitter {
   /** ヘルスチェック結果: roleId → HealthCheckResult */
   private healthCheckResults: Map<string, HealthCheckResult>;
 
+  /** 利用可能モデル一覧（ヘルスチェック時に取得） */
+  private availableModels: string[];
+
   /** Agent 完了待ちの Promise resolver: agentId → resolve[] */
   private waitResolvers: Map<string, Array<() => void>>;
 
@@ -71,6 +75,7 @@ export class AgentManager extends EventEmitter {
     this.groups = new Map();
     this.agents = new Map();
     this.healthCheckResults = new Map();
+    this.availableModels = [];
     this.waitResolvers = new Map();
     this.executor = new AgentExecutor();
   }
@@ -110,7 +115,18 @@ export class AgentManager extends EventEmitter {
     }
 
     group.status = "deleted";
+
+    // グループに属する Agent のデータも削除する
+    for (const agentId of group.agentIds) {
+      this.agents.delete(agentId);
+    }
+
     this.emit("group:deleted", { groupId });
+  }
+
+  /** 全グループ一覧を取得する */
+  listGroups(): GroupDefinition[] {
+    return Array.from(this.groups.values());
   }
 
   /** グループに所属する Agent を取得する */
@@ -164,6 +180,7 @@ export class AgentManager extends EventEmitter {
       toolCallCount: 0,
       recentToolCalls: [],
       result: null,
+      prompt,
       editedFiles: [],
       createdFiles: [],
     };
@@ -178,9 +195,9 @@ export class AgentManager extends EventEmitter {
     this.emit("agent:created", agent);
 
     // AgentExecutor でプロセス起動
-    const fullPrompt = `${role.systemPrompt}\n\n${prompt}`;
+    const fullPrompt = this.buildFullPrompt(role, agentId, groupId, prompt);
     const timeout_ms =
-      options?.timeout_ms ?? this.config.agent.defaultTimeout_ms;
+      options?.timeout_ms ?? this.config.agent.defaultTimeout_ms ?? undefined;
 
     try {
       const pid = this.executor.execute(
@@ -377,8 +394,9 @@ export class AgentManager extends EventEmitter {
       throw new Error(`Agent が見つかりません: ${agentId}`);
     }
 
-    // 完了系ステータスでないと結果登録できない
-    if (!["completed", "failed", "timedOut"].includes(agent.status)) {
+    // running（Agent 自身が実行中に MCP 経由で呼ぶケース）または
+    // 完了系ステータスで結果登録を受け付ける
+    if (!["running", "completed", "failed", "timedOut"].includes(agent.status)) {
       throw new Error(
         `Agent のステータスが結果登録可能な状態ではありません: ${agent.status} (agent=${agentId})`,
       );
@@ -408,8 +426,11 @@ export class AgentManager extends EventEmitter {
     };
 
     // ステータスを resultReported に遷移
-    agent.status = "resultReported";
-    agent.result = result;
+    // updateAgentState を使用して handleAgentCompletion が呼ばれるようにする
+    this.updateAgentState(agentId, {
+      status: "resultReported",
+      result,
+    });
 
     this.emit("agent:result_reported", result);
     return result;
@@ -434,6 +455,16 @@ export class AgentManager extends EventEmitter {
   /** 全職種のヘルスチェック結果を取得する */
   getHealthCheckResults(): HealthCheckResult[] {
     return Array.from(this.healthCheckResults.values());
+  }
+
+  /** 利用可能モデル一覧を設定する */
+  setAvailableModels(models: string[]): void {
+    this.availableModels = [...models];
+  }
+
+  /** 利用可能モデル一覧を取得する */
+  getAvailableModels(): string[] {
+    return this.availableModels;
   }
 
   // ==================================================
@@ -472,53 +503,87 @@ export class AgentManager extends EventEmitter {
     const agent = this.agents.get(agentId);
     if (!agent) return;
 
+    // Cursor CLI の stream-json 出力フォーマット:
+    //   system:    {"type":"system","subtype":"init","model":"...","cwd":"..."}
+    //   user:      {"type":"user","message":{"role":"user","content":[...]}}
+    //   thinking:  {"type":"thinking","subtype":"delta"|"completed","text":"..."}
+    //   assistant: {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"..."}]}}
+    //   tool_call: {"type":"tool_call","subtype":"started"|"completed","call_id":"...","tool_call":{...}}
+    //   result:    {"type":"result","subtype":"success","duration_ms":N,...}
+
     switch (event.type) {
       case "system":
         if (event.subtype === "init") {
-          // running に遷移
           this.updateAgentState(agentId, { status: "running" });
         }
         break;
 
-      case "assistant":
-        this.updateAgentState(agentId, {
-          lastAssistantMessage: event.data.message as string | undefined,
-        });
+      case "assistant": {
+        // message.content[0].text からテキストを抽出
+        const message = event.data.message as
+          | { content?: Array<{ text?: string }> }
+          | undefined;
+        const text = message?.content?.[0]?.text;
+        if (text !== undefined) {
+          this.updateAgentState(agentId, {
+            lastAssistantMessage: text,
+          });
+        }
         break;
+      }
 
-      case "tool_call":
+      case "tool_call": {
+        // tool_call オブジェクトからツール情報を抽出
+        const callId = event.data.call_id as string | undefined;
+        const toolCallObj = event.data.tool_call as
+          | Record<string, Record<string, unknown>>
+          | undefined;
+
+        // ツール名とツール引数を抽出
+        // 形式: { "editToolCall": { "args": { "path": "..." } } }
+        // または { "readToolCall": { "args": { "path": "..." } } } 等
+        const toolEntry = toolCallObj
+          ? Object.entries(toolCallObj)[0]
+          : undefined;
+        const toolName = toolEntry?.[0]; // e.g. "editToolCall"
+        const toolDetails = toolEntry?.[1] as
+          | { args?: Record<string, unknown>; result?: Record<string, unknown> }
+          | undefined;
+        const toolArgs = toolDetails?.args;
+        const filePath = toolArgs?.path as string | undefined;
+
         if (event.subtype === "started") {
           this.updateAgentState(agentId, {
             toolCallCount: agent.toolCallCount + 1,
             recentToolCalls: [
               ...agent.recentToolCalls.slice(-9),
               {
-                callId: event.data.callId as string,
-                type: event.type,
+                callId: callId ?? "",
+                type: toolName ?? event.type,
                 subtype: event.subtype ?? "",
-                args: event.data.args as Record<string, unknown> | undefined,
+                args: toolArgs,
               },
             ],
           });
         } else if (event.subtype === "completed") {
           // ファイル変更の抽出
-          const toolName = event.data.toolName as string | undefined;
-          const args = event.data.args as
-            | Record<string, unknown>
-            | undefined;
-          const filePath = args?.path as string | undefined;
-
-          if (filePath && toolName === "write") {
-            this.updateAgentState(agentId, {
-              createdFiles: [...new Set([...agent.createdFiles, filePath])],
-            });
-          } else if (filePath && toolName === "edit") {
-            this.updateAgentState(agentId, {
-              editedFiles: [...new Set([...agent.editedFiles, filePath])],
-            });
+          // editToolCall はファイル編集（新規作成含む）
+          if (filePath && toolName === "editToolCall") {
+            // result.success があれば成功
+            const result = toolDetails?.result as
+              | { success?: Record<string, unknown> }
+              | undefined;
+            if (result?.success) {
+              // linesAdded > 0 かつ linesRemoved === 0 なら新規作成の可能性が高い
+              // ただし確実な判定は困難なので、全て editedFiles に追加する
+              this.updateAgentState(agentId, {
+                editedFiles: [...new Set([...agent.editedFiles, filePath])],
+              });
+            }
           }
         }
         break;
+      }
 
       case "result":
         if (event.subtype === "success") {
@@ -528,6 +593,10 @@ export class AgentManager extends EventEmitter {
           });
         }
         break;
+
+      case "thinking":
+        // thinking イベントは無視（デバッグ用途のみ）
+        break;
     }
   }
 
@@ -535,10 +604,14 @@ export class AgentManager extends EventEmitter {
   private handleProcessExit(
     agentId: string,
     exitCode: number | null,
-    _signal: string | null,
+    signal: string | null,
   ): void {
     const agent = this.agents.get(agentId);
     if (!agent) return;
+
+    console.error(
+      `[manager] Agent プロセス終了 (${agentId}): exitCode=${exitCode}, signal=${signal}`,
+    );
 
     // 既に完了系ステータスなら何もしない
     if (DONE_STATUSES.includes(agent.status)) return;
@@ -554,7 +627,8 @@ export class AgentManager extends EventEmitter {
   }
 
   /** プロセスエラーのハンドリング */
-  private handleProcessError(agentId: string, _error: Error): void {
+  private handleProcessError(agentId: string, error: Error): void {
+    console.error(`[manager] Agent プロセスエラー (${agentId}):`, error.message);
     const agent = this.agents.get(agentId);
     if (!agent) return;
 
@@ -602,5 +676,57 @@ export class AgentManager extends EventEmitter {
     const timestamp = Math.floor(Date.now() / 1000);
     const random = Math.random().toString(16).slice(2, 6);
     return `${role}-${timestamp}-${random}`;
+  }
+
+  // ==================================================
+  // プロンプト構築
+  // ==================================================
+
+  /**
+   * Agent に渡す最終プロンプトを構築する。
+   *
+   * 構造:
+   *   1. ロールのシステムプロンプト（設定ファイル由来）
+   *   2. kuromajutsu メタデータブロック（agentId, groupId, report_result 指示）
+   *   3. ユーザープロンプト
+   */
+  buildFullPrompt(
+    role: RoleDefinition,
+    agentId: string,
+    groupId: string,
+    userPrompt: string,
+  ): string {
+    const metadataBlock = [
+      "---",
+      "【kuromajutsu システム情報】",
+      "",
+      `あなたは kuromajutsu Agent 管理システムによって起動されたサブ Agent です。`,
+      "",
+      `- Agent ID: ${agentId}`,
+      `- Group ID: ${groupId}`,
+      `- Role: ${role.id}`,
+      "",
+      `【重要: タスク完了時の結果報告】`,
+      `タスクが完了したら、必ず kuromajutsu MCP の \`report_result\` ツールを呼び出して結果を報告してください。`,
+      `以下のパラメータを指定してください:`,
+      "",
+      "```",
+      `agentId: "${agentId}"`,
+      `status: "success" または "failure"`,
+      `summary: "実行結果の要約（何を実施し、どうなったか）"`,
+      `editedFiles: ["編集したファイルパスの配列"]  // 省略可`,
+      `createdFiles: ["新規作成したファイルパスの配列"]  // 省略可`,
+      `errorMessage: "エラーメッセージ"  // 失敗時のみ`,
+      "```",
+      "",
+      `report_result を呼ばないとメイン Agent が結果を受け取れません。タスクの成否に関わらず必ず呼び出してください。`,
+      "---",
+    ].join("\n");
+
+    // ツールブロック（role.tools に定義があれば挿入）
+    const toolBlock = buildToolPromptBlock(role.tools ?? []);
+    const toolSection = toolBlock ? `\n\n${toolBlock}` : "";
+
+    return `${role.systemPrompt}\n\n${metadataBlock}${toolSection}\n\n${userPrompt}`;
   }
 }

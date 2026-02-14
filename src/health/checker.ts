@@ -10,7 +10,13 @@
 // - 結果をコンソールと WebSocket（ダッシュボード）にリアルタイム通知
 
 import { execFile } from "node:child_process";
-import type { AppConfig, HealthCheckResult, RoleDefinition } from "../types/index.js";
+import { getToolDefinition } from "../agent/tools.js";
+import type {
+  AppConfig,
+  HealthCheckResult,
+  RoleDefinition,
+  ToolCheckResult,
+} from "../types/index.js";
 
 // --------------------------------------------------
 // CLI ランナーインターフェース（テスト可能にするための DI）
@@ -56,7 +62,7 @@ export interface HealthCheckCallbacks {
 class DefaultCliRunner implements CliRunner {
   async execCommand(command: string, args: string[]): Promise<CliRunResult> {
     return new Promise((resolve, reject) => {
-      execFile(command, args, { timeout: 60_000 }, (error, stdout, _stderr) => {
+      const child = execFile(command, args, { timeout: 60_000 }, (error, stdout, _stderr) => {
         if (error && error.killed) {
           reject(new Error(`コマンドがタイムアウトしました: ${command} ${args.join(" ")}`));
           return;
@@ -67,6 +73,9 @@ class DefaultCliRunner implements CliRunner {
           exitCode: error?.code ? Number(error.code) : (error ? 1 : 0),
         });
       });
+      // stdin を閉じて、子プロセスが EOF を検知できるようにする
+      // agent CLI は stdin が開いたままだと入力待ちでハングする
+      child.stdin?.end();
     });
   }
 }
@@ -87,6 +96,9 @@ class DefaultCliRunner implements CliRunner {
 export class HealthChecker {
   private runner: CliRunner;
 
+  /** 最後に取得した利用可能モデル一覧（runAll 実行後に設定される） */
+  public availableModels: string[] = [];
+
   constructor(
     private config: AppConfig,
     runner?: CliRunner,
@@ -102,6 +114,9 @@ export class HealthChecker {
 
     // 1. agent models で利用可能モデル一覧を取得
     const availableModels = await this.getAvailableModels();
+
+    // 利用可能モデル一覧を公開プロパティに保存
+    this.availableModels = availableModels ?? [];
 
     // 2. 各職種のモデル検証
     const results: HealthCheckResult[] = this.config.roles.map((role) =>
@@ -139,6 +154,31 @@ export class HealthChecker {
       // 結果を反映
       result.healthCheck = healthResult.healthCheck;
       result.available = healthResult.available;
+
+      // ツール可用性チェック（role に tools が設定されている場合）
+      if (result.available && role.tools && role.tools.length > 0) {
+        const toolChecks = await this.checkRoleTools(role);
+        result.toolChecks = toolChecks;
+
+        const failedTools = toolChecks.filter((t) => t.status === "failed");
+        if (failedTools.length > 0) {
+          result.available = false;
+          result.healthCheck = {
+            status: "failed",
+            reason: `ツールチェック失敗: ${failedTools.map((t) => `${t.toolId} (${t.reason})`).join(", ")}`,
+            responseTime_ms: result.healthCheck.responseTime_ms,
+            checkedAt: result.healthCheck.checkedAt,
+          };
+        }
+
+        // ツールチェック結果のコンソール出力
+        for (const tc of toolChecks) {
+          const icon = tc.status === "passed" ? "✅" : "❌";
+          console.error(
+            `[health]     ${icon} ツール: ${tc.toolId} — ${tc.status}${tc.reason ? ` (${tc.reason})` : ""}`,
+          );
+        }
+      }
 
       // コールバック: チェック完了
       callbacks?.onRoleCheckComplete?.(result);
@@ -185,11 +225,15 @@ export class HealthChecker {
         return null;
       }
 
-      // 各行をトリムし、空行を除外してモデル名の配列にする
+      // 各行をパースし、モデルIDを抽出する
+      // agent models の出力形式: "id - Display Name" （1行1モデル）
+      // ヘッダー行 ("Available models") やフッター行 ("Tip: ...") を除外する
       const models = result.stdout
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => line.length > 0);
+        .filter((line) => line.length > 0)
+        .filter((line) => line.includes(" - "))       // "id - Name" 形式の行のみ
+        .map((line) => line.split(" - ")[0].trim());  // "id" 部分だけ抽出
 
       console.error(
         `[health] 利用可能モデル: ${models.join(", ")} (${models.length} 件)`,
@@ -267,7 +311,7 @@ export class HealthChecker {
 
   /**
    * 職種に対してヘルスチェックプロンプトを実行する。
-   * `agent -p -m {model} "{healthCheckPrompt}"` コマンドを実行し、
+   * `agent -p --trust --model {model} "{healthCheckPrompt}"` コマンドを実行し、
    * 正常にレスポンスが返ればチェック通過とする。
    */
   private async runHealthCheckPrompt(
@@ -279,7 +323,8 @@ export class HealthChecker {
     try {
       const result = await this.runner.execCommand("agent", [
         "-p",
-        "-m",
+        "--trust",
+        "--model",
         role.model,
         role.healthCheckPrompt,
       ]);
@@ -318,5 +363,56 @@ export class HealthChecker {
         available: false,
       };
     }
+  }
+
+  /**
+   * 職種に設定されたツールの可用性をチェックする。
+   * 各ツールの healthCheckCommand を実行し、exit code 0 なら passed。
+   */
+  private async checkRoleTools(role: RoleDefinition): Promise<ToolCheckResult[]> {
+    const results: ToolCheckResult[] = [];
+
+    for (const toolId of role.tools ?? []) {
+      const toolDef = getToolDefinition(toolId);
+      if (!toolDef) {
+        results.push({
+          toolId,
+          status: "failed",
+          reason: `ツール定義が見つかりません: ${toolId}`,
+        });
+        continue;
+      }
+
+      if (!toolDef.healthCheckCommand) {
+        // ヘルスチェックコマンドが未定義のツールは passed とみなす
+        results.push({ toolId, status: "passed" });
+        continue;
+      }
+
+      try {
+        const result = await this.runner.execCommand(
+          toolDef.healthCheckCommand.command,
+          toolDef.healthCheckCommand.args,
+        );
+
+        if (result.exitCode !== 0) {
+          results.push({
+            toolId,
+            status: "failed",
+            reason: `コマンドが非ゼロ終了 (exitCode=${result.exitCode})。${toolDef.name} がインストールされているか確認してください`,
+          });
+        } else {
+          results.push({ toolId, status: "passed" });
+        }
+      } catch (error) {
+        results.push({
+          toolId,
+          status: "failed",
+          reason: `コマンド実行失敗: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    return results;
   }
 }

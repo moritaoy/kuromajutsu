@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "kuromajutsu": {
+      "url": "http://localhost:9696/mcp"
+    }
+  }
+}

@@ -10,7 +10,7 @@ describe("loadConfig", () => {
     const config = loadConfig();
 
     expect(config.dashboard.port).toBe(9696);
-    expect(config.agent.defaultTimeout_ms).toBe(300_000);
+    expect(config.agent.defaultTimeout_ms).toBeUndefined();
     expect(config.agent.maxConcurrent).toBe(10);
     expect(config.log.level).toBe("info");
     expect(config.roles.length).toBeGreaterThan(0);

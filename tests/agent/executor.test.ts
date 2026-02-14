@@ -70,7 +70,7 @@ describe("AgentExecutor", () => {
       "agent",
       expect.arrayContaining([
         "-p", "--force",
-        "-m", "claude-4-sonnet",
+        "--model", "claude-4-sonnet",
         "--output-format", "stream-json",
         "--stream-partial-output",
         "Hello world",

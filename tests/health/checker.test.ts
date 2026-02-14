@@ -65,7 +65,7 @@ describe("HealthChecker", () => {
     it("agent models コマンドを実行して利用可能モデル一覧を取得する", async () => {
       const runner = createMockRunner({
         execCommand: vi.fn().mockResolvedValue({
-          stdout: "claude-4-sonnet\nclaude-4-opus\ngpt-4o\n",
+          stdout: "claude-4-sonnet - Claude 4 Sonnet\nclaude-4-opus - Claude 4 Opus\ngpt-4o - GPT-4o\n",
           exitCode: 0,
         }),
       });
@@ -83,7 +83,7 @@ describe("HealthChecker", () => {
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
               return {
-                stdout: "claude-4-sonnet\nclaude-4-opus\n",
+                stdout: "claude-4-sonnet - Claude 4 Sonnet\nclaude-4-opus - Claude 4 Opus\n",
                 exitCode: 0,
               };
             }
@@ -121,7 +121,7 @@ describe("HealthChecker", () => {
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
               return {
-                stdout: "claude-4-sonnet\nclaude-4-opus\n",
+                stdout: "claude-4-sonnet - Claude 4 Sonnet\nclaude-4-opus - Claude 4 Opus\n",
                 exitCode: 0,
               };
             }
@@ -193,7 +193,7 @@ describe("HealthChecker", () => {
             if (args[0] === "models") {
               return {
                 stdout:
-                  "\n  claude-4-sonnet  \n\n  claude-4-opus  \n  gpt-4o  \n\n",
+                  "\n  claude-4-sonnet - Claude 4 Sonnet  \n\n  claude-4-opus - Claude 4 Opus  \n  gpt-4o - GPT-4o  \n\n",
                 exitCode: 0,
               };
             }
@@ -223,7 +223,7 @@ describe("HealthChecker", () => {
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
               return {
-                stdout: "claude-4-sonnet\n",
+                stdout: "claude-4-sonnet - Claude 4 Sonnet\n",
                 exitCode: 0,
               };
             }
@@ -248,7 +248,8 @@ describe("HealthChecker", () => {
       for (const call of healthCheckCalls) {
         expect(call[0]).toBe("agent");
         expect(call[1]).toContain("-p");
-        expect(call[1]).toContain("-m");
+        expect(call[1]).toContain("--trust");
+        expect(call[1]).toContain("--model");
         expect(call[1]).toContain("claude-4-sonnet");
         expect(call[1]).toContain("Hello, respond with exactly: OK");
       }
@@ -259,7 +260,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -283,7 +284,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             // ヘルスチェック実行が非ゼロで終了
             return { stdout: "", exitCode: 1 };
@@ -306,7 +307,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             throw new Error("spawn failed");
           },
@@ -349,7 +350,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -392,7 +393,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -413,7 +414,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -434,7 +435,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -458,7 +459,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -495,7 +496,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -521,7 +522,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -542,6 +543,56 @@ describe("HealthChecker", () => {
       }
     });
 
+    it("runAll 後に availableModels プロパティでモデル一覧を取得できる", async () => {
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return {
+                stdout: "claude-4-sonnet - Claude 4 Sonnet\nclaude-4-opus - Claude 4 Opus\ngpt-4o - GPT-4o\n",
+                exitCode: 0,
+              };
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(config, runner);
+      await checker.runAll();
+
+      expect(checker.availableModels).toEqual([
+        "claude-4-sonnet",
+        "claude-4-opus",
+        "gpt-4o",
+      ]);
+    });
+
+    it("agent models コマンドが失敗した場合は availableModels が空配列", async () => {
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return { stdout: "", exitCode: 1 };
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(config, runner);
+      await checker.runAll();
+
+      expect(checker.availableModels).toEqual([]);
+    });
+
+    it("runAll 前の availableModels は空配列", () => {
+      const runner = createMockRunner();
+      const checker = new HealthChecker(config, runner);
+
+      expect(checker.availableModels).toEqual([]);
+    });
+
     it("CliRunner を渡さない場合にデフォルトの CliRunner が使われる", () => {
       // コンストラクタがエラーなく動作すること（デフォルト CliRunner）
       const checker = new HealthChecker(config);
@@ -554,7 +605,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -579,7 +630,7 @@ describe("HealthChecker", () => {
         execCommand: vi.fn().mockImplementation(
           async (cmd: string, args: string[]) => {
             if (args[0] === "models") {
-              return { stdout: "claude-4-sonnet\n", exitCode: 0 };
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
             }
             return { stdout: "OK", exitCode: 0 };
           },
@@ -600,6 +651,183 @@ describe("HealthChecker", () => {
       );
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  // ==================================================
+  // ツール可用性チェック
+  // ==================================================
+
+  describe("ツール可用性チェック", () => {
+    it("ツールが設定されている職種で、ツールが利用可能な場合は available=true になる", async () => {
+      const configWithTools = createTestConfig({
+        roles: [
+          {
+            id: "text-review",
+            name: "文章レビュワー",
+            model: "claude-4-sonnet",
+            systemPrompt: "あなたは文章レビューの専門家です。",
+            healthCheckPrompt: "Hello, respond with exactly: OK",
+            tools: ["textlint"],
+          },
+        ],
+      });
+
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
+            }
+            if (cmd === "npx" && args[0] === "textlint") {
+              return { stdout: "14.5.0", exitCode: 0 };
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(configWithTools, runner);
+      const results = await checker.runAll();
+
+      expect(results).toHaveLength(1);
+      expect(results[0].available).toBe(true);
+      expect(results[0].toolChecks).toHaveLength(1);
+      expect(results[0].toolChecks![0].toolId).toBe("textlint");
+      expect(results[0].toolChecks![0].status).toBe("passed");
+    });
+
+    it("ツールが設定されている職種で、ツールが利用不可な場合は available=false になる", async () => {
+      const configWithTools = createTestConfig({
+        roles: [
+          {
+            id: "text-review",
+            name: "文章レビュワー",
+            model: "claude-4-sonnet",
+            systemPrompt: "あなたは文章レビューの専門家です。",
+            healthCheckPrompt: "Hello, respond with exactly: OK",
+            tools: ["textlint"],
+          },
+        ],
+      });
+
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
+            }
+            if (cmd === "npx" && args[0] === "textlint") {
+              return { stdout: "", exitCode: 1 };
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(configWithTools, runner);
+      const results = await checker.runAll();
+
+      expect(results).toHaveLength(1);
+      expect(results[0].available).toBe(false);
+      expect(results[0].healthCheck.status).toBe("failed");
+      expect(results[0].healthCheck.reason).toContain("ツールチェック失敗");
+      expect(results[0].healthCheck.reason).toContain("textlint");
+      expect(results[0].toolChecks).toHaveLength(1);
+      expect(results[0].toolChecks![0].status).toBe("failed");
+    });
+
+    it("ツールのヘルスチェックコマンドが例外を投げた場合は failed になる", async () => {
+      const configWithTools = createTestConfig({
+        roles: [
+          {
+            id: "text-review",
+            name: "文章レビュワー",
+            model: "claude-4-sonnet",
+            systemPrompt: "あなたは文章レビューの専門家です。",
+            healthCheckPrompt: "Hello, respond with exactly: OK",
+            tools: ["textlint"],
+          },
+        ],
+      });
+
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
+            }
+            if (cmd === "npx" && args[0] === "textlint") {
+              throw new Error("npx not found");
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(configWithTools, runner);
+      const results = await checker.runAll();
+
+      expect(results).toHaveLength(1);
+      expect(results[0].available).toBe(false);
+      expect(results[0].toolChecks![0].status).toBe("failed");
+      expect(results[0].toolChecks![0].reason).toContain("npx not found");
+    });
+
+    it("ツールが設定されていない職種ではツールチェックが実行されない", async () => {
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(config, runner);
+      const results = await checker.runAll();
+
+      for (const result of results) {
+        expect(result.toolChecks).toBeUndefined();
+        expect(result.available).toBe(true);
+      }
+    });
+
+    it("未知のツール ID が設定されている場合は failed になる", async () => {
+      const configWithUnknown = createTestConfig({
+        roles: [
+          {
+            id: "custom-role",
+            name: "カスタム職種",
+            model: "claude-4-sonnet",
+            systemPrompt: "test",
+            healthCheckPrompt: "Hello, respond with exactly: OK",
+            tools: ["unknown-tool"],
+          },
+        ],
+      });
+
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(
+          async (cmd: string, args: string[]) => {
+            if (args[0] === "models") {
+              return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
+            }
+            return { stdout: "OK", exitCode: 0 };
+          },
+        ),
+      });
+
+      const checker = new HealthChecker(configWithUnknown, runner);
+      const results = await checker.runAll();
+
+      expect(results).toHaveLength(1);
+      expect(results[0].available).toBe(false);
+      expect(results[0].toolChecks).toHaveLength(1);
+      expect(results[0].toolChecks![0].status).toBe("failed");
+      expect(results[0].toolChecks![0].reason).toContain("ツール定義が見つかりません");
     });
   });
 });

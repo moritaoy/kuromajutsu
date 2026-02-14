@@ -78,39 +78,44 @@ project-root/
 1. **TDD**: テストを先に書く
 2. **仕様書優先**: 実装前に `docs/spec.md` を必ず確認
 3. **型安全**: TypeScript の strict モードを使用
-4. **Docker 必須**: 開発・テスト・ビルドは **すべて Docker コンテナ内で実行** する
+4. **ハイブリッド実行**: テスト・ビルドは Docker、開発実行はホスト
 
-### ⚠️ Docker 実行の厳守
+### 実行環境の使い分け
 
-**ローカル環境での `npm test` / `npm run build` 等の直接実行は禁止です。**
-必ず `docker compose run --rm app ...` 経由で実行してください。
+| 用途 | 実行環境 | 理由 |
+|------|---------|------|
+| テスト (`npm test`) | Docker | CLI はモック済み。隔離環境で実行 |
+| ビルド (`npm run build`) | Docker | TypeScript コンパイルに CLI 不要 |
+| 開発実行 (`npm run dev`) | **ホスト** | Cursor CLI (`agent`) が必要 |
+| ダッシュボード確認のみ | Docker (`docker compose up`) | CLI 不要の UI 確認用 |
+
+### ⚠️ テスト・ビルドは Docker で実行
 
 ```bash
-# ✅ 正しい実行方法
+# ✅ テスト・ビルド（Docker）
 docker compose run --rm app npm test
 docker compose run --rm app npm run build
 docker compose run --rm app npx tsc --noEmit
 
-# ❌ やってはいけない実行方法
-npm test            # ローカル実行は禁止
-npm run build       # ローカル実行は禁止
-npx vitest run      # ローカル実行は禁止
+# ❌ テスト・ビルドのローカル直接実行は禁止
+npm test            # Docker 経由で実行すること
+npm run build       # Docker 経由で実行すること
 ```
 
-理由: `node_modules` はコンテナ内でインストールされており、ローカルには存在しません。
+### ⚠️ 開発実行はホストで実行
 
-## 起動方法
+Cursor CLI（`agent` コマンド）はホスト側にしか存在しないため、
+ヘルスチェック・Agent 実行・モデル一覧取得を動かすにはホスト上で直接実行する。
 
 ```bash
-# 開発モード（Docker）
+# セットアップ（初回のみ）
+npm install
+
+# ✅ 開発実行（ホスト）
+npm run dev
+
+# ダッシュボード確認のみ（Docker — CLI 機能なし）
 docker compose up
 
-# ビルド
-docker compose run --rm app npm run build
-
-# テスト
-docker compose run --rm app npm test
-
-# ダッシュボード確認
-# ブラウザで http://localhost:9696 を開く
+# ダッシュボード → http://localhost:9696
 ```

@@ -68,10 +68,11 @@ export class AgentExecutor {
     callbacks: ExecutorCallbacks,
   ): number {
     // 1. コマンド引数を構築
+    // 注意: Cursor CLI は -m ショートフラグ未対応のため --model を使用
     const args = [
       "-p",
       "--force",
-      "-m",
+      "--model",
       options.model,
       "--output-format",
       "stream-json",
@@ -92,10 +93,12 @@ export class AgentExecutor {
     parser.resume();
     child.stdout?.pipe(parser);
 
-    // 4. stderr をバッファに蓄積（ログ用）
+    // 4. stderr をバッファに蓄積しつつログ出力
     let stderrBuffer = "";
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBuffer += chunk.toString();
+      const text = chunk.toString();
+      stderrBuffer += text;
+      console.error(`[executor:${agentId}] stderr: ${text.trimEnd()}`);
     });
 
     // 5. プロセス終了ハンドリング

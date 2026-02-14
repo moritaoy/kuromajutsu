@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/textlint/textlint/master/packages/textlint/textlint-schema.json",
+  "rules": {
+    "preset-japanese": true,
+    "preset-jtf-style": {
+      "1.1.3.箇条書き": false,
+      "4.3.7.山カッコ<>": false
+    }
+  }
+}

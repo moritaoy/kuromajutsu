@@ -37,10 +37,32 @@ export interface RoleDefinition {
   systemPrompt: string;
   /** 使用する LLM モデル名（Cursor CLI の -m オプションに渡す値） */
   model: string;
-  /** 使用可能なツールセット（将来の拡張用） */
+  /** 使用可能なツール ID の一覧（ツールレジストリで定義されたツールを参照） */
   tools?: string[];
   /** ヘルスチェック時に使用する簡易テストプロンプト */
   healthCheckPrompt: string;
+}
+
+// --------------------------------------------------
+// ロールツール定義（Agent に提供する外部ツール）
+// --------------------------------------------------
+
+/**
+ * Agent が利用可能な外部ツールの定義。
+ * ツールは Agent のプロンプトに使用方法として注入され、
+ * Agent が Shell 経由で実行する。
+ */
+export interface RoleToolDefinition {
+  /** ツール ID（roles[].tools で参照する値） */
+  id: string;
+  /** 表示名 */
+  name: string;
+  /** ツールの概要説明 */
+  description: string;
+  /** Agent のプロンプトに注入する使用方法の説明（Markdown 形式） */
+  promptInstructions: string;
+  /** ヘルスチェック用コマンド（ツールが利用可能か検証する） */
+  healthCheckCommand?: { command: string; args: string[] };
 }
 
 // --------------------------------------------------
@@ -80,6 +102,8 @@ export interface AgentState {
   recentToolCalls: ToolCallRecord[];
   /** 実行結果（完了後に設定） */
   result: AgentResult | null;
+  /** 呼び出し時のユーザープロンプト */
+  prompt?: string;
   /** 子プロセス PID */
   pid?: number;
   /** 編集したファイル一覧（stream-json から自動収集） */
@@ -143,6 +167,16 @@ export type ModelValidationStatus = "valid" | "invalid";
 /** ヘルスチェックステータス */
 export type HealthCheckStatus = "passed" | "failed" | "skipped";
 
+/** ツールチェック結果 */
+export interface ToolCheckResult {
+  /** ツール ID */
+  toolId: string;
+  /** チェック結果 */
+  status: "passed" | "failed";
+  /** 失敗理由 */
+  reason?: string;
+}
+
 /** ヘルスチェック結果 */
 export interface HealthCheckResult {
   /** チェック対象の職種 ID */
@@ -161,6 +195,8 @@ export interface HealthCheckResult {
     responseTime_ms?: number;
     checkedAt?: string;
   };
+  /** ツールチェック結果（職種にツールが設定されている場合のみ） */
+  toolChecks?: ToolCheckResult[];
   /** この職種が利用可能かどうか */
   available: boolean;
 }
@@ -176,7 +212,7 @@ export interface DashboardConfig {
 
 /** Agent 実行設定 */
 export interface AgentConfig {
-  defaultTimeout_ms: number;
+  defaultTimeout_ms?: number;
   maxConcurrent: number;
 }
 
@@ -199,7 +235,7 @@ export interface AppConfig {
 
 /** サーバー → クライアント イベント */
 export type ServerEvent =
-  | { type: "server:startup"; data: { startedAt: string } }
+  | { type: "server:startup"; data: { startedAt: string; availableModels: string[] } }
   | { type: "healthcheck:model_validation"; data: { results: HealthCheckResult[] } }
   | { type: "healthcheck:role_start"; data: { roleId: string } }
   | { type: "healthcheck:role_complete"; data: HealthCheckResult }

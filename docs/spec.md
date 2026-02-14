@@ -36,16 +36,23 @@ graph TB
 | 設定管理 | YAML（`kuromajutsu.config.yaml`） |
 | コンテナ実行環境 | Docker / Docker Compose |
 
-### 1.3.1 Docker 実行環境
+### 1.3.1 実行環境
 
-開発・テスト・ビルドは Docker コンテナ内で実行する。ホスト環境に Node.js のインストールは不要。
+テスト・ビルドは Docker コンテナ内で実行する。開発実行（`npm run dev`）は Cursor CLI（`agent` コマンド）を必要とするため、ホスト上で直接実行する。
 
-**起動コマンド:**
+**開発実行（ホスト）:**
 
 ```bash
-# 開発モード（ホットリロード付き）
-docker compose up
+# セットアップ（初回のみ）
+npm install
 
+# 開発モード（ホットリロード付き、Cursor CLI 利用可能）
+npm run dev
+```
+
+**テスト・ビルド（Docker）:**
+
+```bash
 # ビルド
 docker compose run --rm app npm run build
 
@@ -53,12 +60,19 @@ docker compose run --rm app npm run build
 docker compose run --rm app npm test
 ```
 
+**ダッシュボード確認のみ（Docker）:**
+
+```bash
+# Docker でダッシュボードを起動（Cursor CLI 機能は動作しない）
+docker compose up
+```
+
 **ポートマッピング:**
 - `9696:9696` — ダッシュボード UI
 
 **ボリューム:**
 - プロジェクトルートをコンテナにマウント（ホットリロード対応）
-- `node_modules` はコンテナ内に隔離
+- `node_modules` はコンテナ内に隔離（ホスト側の `node_modules` とは独立）
 
 ### 1.4 動作原理
 
@@ -345,7 +359,8 @@ Agent の実行完了後に、結果データを登録する。このツール�
         "availableModels": ["claude-4-sonnet", "claude-4-opus", "gpt-4o"]
       }
     }
-  ]
+  ],
+  "availableModels": ["claude-4-sonnet", "claude-4-opus", "gpt-4o"]
 }
 ```
 
@@ -409,7 +424,7 @@ interface RoleDefinition {
   systemPrompt: string;
   /** 使用する LLM モデル名（Cursor CLI の -m オプションに渡す値） */
   model: string;
-  /** 使用可能なツールセット（将来の拡張用） */
+  /** 使用可能なツール ID の一覧（ツールレジストリで定義されたツールを参照） */
   tools?: string[];
   /** ヘルスチェック時に使用する簡易テストプロンプト */
   healthCheckPrompt: string;
@@ -465,6 +480,56 @@ interface RoleDefinition {
 - UI から変更した場合、設定ファイルにも反映する
 - 将来的にカスタム職種の追加に対応する
 
+### 4.4 ロールツール機能
+
+職種には外部ツールを紐付けることができる。ツールは `kuromajutsu.config.yaml` の `roles[].tools` にツール ID を指定して有効化する。有効化されたツールの使用方法は、Agent 起動時にプロンプトへ自動注入される。
+
+#### 4.4.1 ツール定義の構造
+
+```typescript
+interface RoleToolDefinition {
+  /** ツール ID（roles[].tools で参照する値） */
+  id: string;
+  /** 表示名 */
+  name: string;
+  /** ツールの概要説明 */
+  description: string;
+  /** Agent のプロンプトに注入する使用方法の説明（Markdown 形式） */
+  promptInstructions: string;
+}
+```
+
+#### 4.4.2 ビルトインツール一覧
+
+| ツール ID | 名前 | 説明 |
+|-----------|------|------|
+| `textlint` | textlint | 文章の品質チェックツール。日本語の文法・表現ルールに基づいて問題を検出する |
+
+#### 4.4.3 プロンプトへの注入
+
+Agent 起動時、`buildFullPrompt()` が以下の3層構造から4層構造に拡張される:
+
+1. ロールのシステムプロンプト（設定ファイル由来）
+2. kuromajutsu メタデータブロック（agentId, groupId, report_result 指示）
+3. **ツールブロック**（ロールに紐付くツールの使用方法）← 新規追加
+4. ユーザープロンプト
+
+ツールが設定されていないロールでは、ツールブロックは省略される（従来の3層構造と同等）。
+
+#### 4.4.4 設定例
+
+```yaml
+roles:
+  - id: text-review
+    name: 文章レビュワー
+    model: claude-4-sonnet
+    systemPrompt: |
+      あなたは文章レビューの専門家です。...
+    healthCheckPrompt: "Hello, respond with exactly: OK"
+    tools:
+      - textlint
+```
+
 ---
 
 ## 5. Agent 実行ライフサイクル
@@ -479,6 +544,7 @@ stateDiagram-v2
     Running --> Completed: exit code 0 かつ result イベント受信
     Running --> Failed: 非ゼロ exit code またはエラー
     Running --> TimedOut: タイムアウト到達
+    Running --> ResultReported: Agent 自身が実行中に report_result 呼び出し
     Completed --> ResultReported: report_result 呼び出し
     Failed --> ResultReported: report_result 呼び出し
     TimedOut --> ResultReported: report_result 呼び出し
@@ -498,13 +564,60 @@ agent -p --force \
   -m "{role.model}" \
   --output-format stream-json \
   --stream-partial-output \
-  "{role.systemPrompt}\n\n{userPrompt}"
+  "{fullPrompt}"
 ```
 
 - `--force`: 確認なしでファイル変更を許可
 - `-m`: 職種に設定されたモデルを指定
 - `--output-format stream-json`: NDJSON 形式でイベントをストリーム出力
 - `--stream-partial-output`: 文字単位のリアルタイム差分を有効化
+
+#### 5.3.1 プロンプト構築
+
+Agent に渡すプロンプト（`fullPrompt`）は以下の3層構造で動的に構築する:
+
+```
+{role.systemPrompt}
+
+---
+【kuromajutsu システム情報】
+
+あなたは kuromajutsu Agent 管理システムによって起動されたサブ Agent です。
+
+- Agent ID: {agentId}
+- Group ID: {groupId}
+- Role: {role.id}
+
+【重要: タスク完了時の結果報告】
+タスクが完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。
+以下のパラメータを指定してください:
+
+  agentId: "{agentId}"
+  status: "success" または "failure"
+  summary: "実行結果の要約（何を実施し、どうなったか）"
+  editedFiles: ["編集したファイルパスの配列"]  // 省略可
+  createdFiles: ["新規作成したファイルパスの配列"]  // 省略可
+  errorMessage: "エラーメッセージ"  // 失敗時のみ
+
+report_result を呼ばないとメイン Agent が結果を受け取れません。タスクの成否に関わらず必ず呼び出してください。
+---
+
+{userPrompt}
+```
+
+**各層の役割:**
+
+| 層 | 内容 | ソース |
+|---|---|---|
+| 第1層: ロールプロンプト | 職種固有の指示（専門家としての振る舞い等） | `kuromajutsu.config.yaml` の `systemPrompt` |
+| 第2層: メタデータブロック | Agent ID、Group ID、`report_result` の呼び出し指示 | `AgentManager.buildFullPrompt()` で動的生成 |
+| 第3層: ユーザープロンプト | メイン Agent が `run_agent` で指定した具体的タスク内容 | `run_agent` ツールの `prompt` パラメータ |
+
+**設計意図:**
+
+- サブ Agent は自身の `agentId` を知る必要がある（`report_result` の必須パラメータ）
+- メイン Agent が `report_result` を代理呼び出しすることは想定しない。サブ Agent 自身が MCP 経由で呼び出す
+- 第2層のメタデータブロックにより、設定ファイルの `systemPrompt` を変更せずに動的な情報を注入できる
 
 ### 5.4 stream-json パース
 
@@ -522,7 +635,8 @@ Cursor CLI が出力する NDJSON の各イベントタイプをパースして 
 ### 5.5 タイムアウト処理
 
 - `run_agent` 呼び出し時に `timeout_ms` を指定可能
-- 指定なしの場合は設定ファイルの `defaultTimeout_ms` を使用
+- 指定なしの場合はタイムアウトなし（無制限）
+- 設定ファイルの `defaultTimeout_ms` でデフォルト値を設定することも可能（オプション）
 - タイムアウト到達時に子プロセスを SIGTERM で終了し、ステータスを `TimedOut` に更新
 
 ---
@@ -566,7 +680,7 @@ interface AgentResult {
 
 1. **自動収集（stream-json パース由来）:** Agent の子プロセスが出力する stream-json から、`tool_call` イベント（writeToolCall）を解析し、`editedFiles` / `createdFiles` を自動的に収集する。`result` イベントから `duration_ms` を取得する。
 
-2. **Agent 自身による報告（`report_result` ツール）:** Agent のシステムプロンプトに「完了後は `report_result` を呼び出すこと」と指示しておく。Agent が MCP ツール `report_result` を呼び出すことで、`summary` や `status` などの情報を登録する。
+2. **Agent 自身による報告（`report_result` ツール）:** プロンプト構築時にメタデータブロック（5.3.1 参照）で `agentId` と `report_result` の呼び出し方法を注入する。サブ Agent はこの情報をもとに MCP ツール `report_result` を呼び出し、`summary` や `status` などの情報を登録する。
 
 3. **結合:** サーバー側は自動収集したデータと Agent の自己報告データをマージして最終的な `AgentResult` を構築する。
 
@@ -578,6 +692,8 @@ interface AgentResult {
 | 子プロセスが非ゼロ終了コードで異常終了 | `failure` | stderr の内容を `errorMessage` に記録 |
 | タイムアウトで強制終了 | `timeout` | それまでに収集した情報で結果を構築 |
 | report_result が呼ばれなかった場合 | 自動判定 | exit code と result イベントから status を判定。summary は最終アシスタントメッセージを使用 |
+
+> **注:** `report_result` は `running` 状態でも受け付ける。サブ Agent が MCP 経由で `report_result` を呼ぶタイミングは、Agent プロセスが終了する前（`result` イベント受信前）であるため、`running` 状態での呼び出しが正常なフローである。
 
 ---
 
@@ -759,13 +875,25 @@ interface HealthCheckResult {
 - チェック完了（失敗）: 赤バツアイコンに切替
 - モデル検証エラー: 警告バッジ + 利用可能モデルの提案表示
 
+#### 8.2.5 システム情報画面
+
+サーバー環境に関する情報を表示する。職種登録時のモデル名確認に使用する。
+
+**表示項目:**
+- 利用可能モデル一覧（`agent models` コマンドで取得したモデル名のリスト）
+
+**UI表現:**
+- モデル名はモノスペースフォントで表示し、テキスト選択可能にする
+- モデルが0件の場合は「モデル情報がありません」と表示する
+- モデル数のサマリバッジを表示する
+
 ### 8.3 WebSocket イベント
 
 サーバーからクライアント（UI）へ送信するイベント:
 
 | イベント名 | 説明 | タイミング |
 |---|---|---|
-| `server:startup` | サーバー起動通知 | MCPサーバー起動時 |
+| `server:startup` | サーバー起動通知（`availableModels` を含む） | MCPサーバー起動時 |
 | `healthcheck:model_validation` | モデル検証結果 | モデル検証完了時 |
 | `healthcheck:role_start` | 職種チェック開始 | 各職種のヘルスチェック開始時 |
 | `healthcheck:role_complete` | 職種チェック完了 | 各職種のヘルスチェック完了時 |
@@ -804,7 +932,7 @@ dashboard:
 
 # Agent 実行設定
 agent:
-  defaultTimeout_ms: 300000  # デフォルトタイムアウト: 5分
+  # defaultTimeout_ms: 300000  # デフォルトタイムアウト（省略時: タイムアウトなし）
   maxConcurrent: 10          # 最大同時実行数
 
 # ログ設定
@@ -931,7 +1059,7 @@ roles:
 - **Agent 間依存関係（DAG 実行）:** Agent の実行順序に依存関係を定義し、DAG として管理する
 - **実行結果の永続化:** SQLite 等でセッション間をまたいで実行履歴を保持する
 - **Agent のキャンセル機能:** 実行中の Agent を MCP ツール経由で中断する `cancel_agent` ツールの追加
-- **特定ツールを持った職種:** 職種ごとに使用可能な MCP ツールセットを制限・拡張する
+- **ツール機能の拡張:** 現在はビルトインの textlint ツールのみ対応。カスタムツール定義や設定ファイルからのツール登録に対応する
 - **実行コスト追跡:** API 使用量やトークン数を記録し、コスト分析を可能にする
 - **通知機能:** Agent の完了や失敗をシステム通知やチャットで知らせる
 

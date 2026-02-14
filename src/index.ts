@@ -3,7 +3,11 @@
 // ============================================================
 
 import { loadConfig } from "./config/loader.js";
-import { createMcpServer, startMcpServer } from "./mcp/server.js";
+import {
+  createMcpServer,
+  startMcpServer,
+  createMcpHttpHandler,
+} from "./mcp/server.js";
 import { startDashboardServer } from "./dashboard/server.js";
 import { HealthChecker } from "./health/checker.js";
 import { AgentManager } from "./agent/manager.js";
@@ -18,10 +22,13 @@ async function main(): Promise<void> {
   // 2. AgentManager 作成
   const manager = new AgentManager(config);
 
-  // 3. ダッシュボード HTTP サーバー起動
-  startDashboardServer(config);
+  // 3. MCP HTTP ハンドラー作成（Streamable HTTP トランスポート）
+  const mcpHttpHandler = createMcpHttpHandler(config, manager);
 
-  // 4. ヘルスチェック実行（コールバックで AgentManager にリアルタイム通知）
+  // 4. ダッシュボード HTTP + WebSocket サーバー起動（MCP エンドポイント付き）
+  startDashboardServer(config, manager, mcpHttpHandler);
+
+  // 5. ヘルスチェック実行（コールバックで AgentManager にリアルタイム通知）
   const checker = new HealthChecker(config);
   const healthResults = await checker.runAll({
     onModelValidation: (results) => {
@@ -38,10 +45,18 @@ async function main(): Promise<void> {
     },
   });
   manager.setHealthCheckResults(healthResults);
+  manager.setAvailableModels(checker.availableModels);
 
-  // 5. MCP サーバー起動（stdio）
-  const mcpServer = createMcpServer(config, manager);
-  await startMcpServer(mcpServer);
+  // 6. MCP サーバー起動（stdio — Cursor からプロセス起動された場合のみ）
+  if (!process.stdin.isTTY) {
+    const mcpServer = createMcpServer(config, manager);
+    await startMcpServer(mcpServer);
+  } else {
+    console.error(
+      `[mcp] MCP HTTP トランスポートが http://localhost:${config.dashboard.port}/mcp で利用可能です`,
+    );
+    console.error("[mcp] stdio トランスポートはスキップしました（TTY 検出）");
+  }
 }
 
 main().catch((err) => {

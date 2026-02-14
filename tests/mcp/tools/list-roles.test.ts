@@ -122,4 +122,21 @@ describe("list_roles", () => {
     expect(role.name).toBe("コード実装者");
     expect(role.model).toBe("claude-4-sonnet");
   });
+
+  it("利用可能モデル一覧を含む", () => {
+    const models = ["claude-4-sonnet", "claude-4-opus", "gpt-4o"];
+    manager.setAvailableModels(models);
+
+    const result = handleListRoles(config, manager);
+    const data = JSON.parse(result.content[0].text);
+
+    expect(data.availableModels).toEqual(models);
+  });
+
+  it("利用可能モデルが未設定の場合は空配列を返す", () => {
+    const result = handleListRoles(config, manager);
+    const data = JSON.parse(result.content[0].text);
+
+    expect(data.availableModels).toEqual([]);
+  });
 });
