@@ -67,6 +67,10 @@
 | registerTools | Register Tools | 全 8 つの MCP ツールを McpServer に一括登録する関数。各ツールハンドラに AgentManager を注入する。`src/mcp/tools/index.ts` に実装 |
 | handle* 関数 | Handle Functions | 各 MCP ツールのビジネスロジックをエクスポートした関数群（`handleCreateGroup`, `handleDeleteGroup` 等）。テストから直接呼び出し可能にするため、`server.tool()` コールバックとは分離して定義。`src/mcp/tools/*.ts` に実装 |
 | errorResponse | Error Response | MCP ツールがエラーを返す際の共通ヘルパー関数。`{ content: [{ type: "text", text: JSON.stringify({ error, code, message }) }], isError: true }` 形式のレスポンスを構築する |
+| HealthChecker | Health Checker | MCPサーバー起動時にモデル検証とヘルスチェックプロンプトを実行するコンポーネント。`agent models` でモデル一覧を取得し、各職種のモデルを照合後、`healthCheckPrompt` を Cursor CLI で実行する。`src/health/checker.ts` に実装 |
+| CliRunner | CLI Runner | CLI コマンドを実行するインターフェース。`execCommand(command, args)` メソッドを持ち、テスト時にモックに差し替えることで HealthChecker の単体テストを可能にする。`src/health/checker.ts` で定義 |
+| DefaultCliRunner | Default CLI Runner | `CliRunner` インターフェースの実プロセス実装。`child_process.execFile` で CLI コマンドを実行する。60秒タイムアウト付き |
+| HealthCheckCallbacks | Health Check Callbacks | HealthChecker の進行状況を外部に通知するコールバック型。`onModelValidation`, `onRoleCheckStart`, `onRoleCheckComplete`, `onComplete` の4つのオプショナルコールバックで構成。`index.ts` でダッシュボード WebSocket イベントへの中継に使用 |
 
 ## UI コンポーネント
 

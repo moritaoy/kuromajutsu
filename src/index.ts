@@ -21,9 +21,22 @@ async function main(): Promise<void> {
   // 3. ダッシュボード HTTP サーバー起動
   startDashboardServer(config);
 
-  // 4. ヘルスチェック実行
+  // 4. ヘルスチェック実行（コールバックで AgentManager にリアルタイム通知）
   const checker = new HealthChecker(config);
-  const healthResults = await checker.runAll();
+  const healthResults = await checker.runAll({
+    onModelValidation: (results) => {
+      manager.emit("healthcheck:model_validation", { results });
+    },
+    onRoleCheckStart: (roleId) => {
+      manager.emit("healthcheck:role_start", { roleId });
+    },
+    onRoleCheckComplete: (result) => {
+      manager.emit("healthcheck:role_complete", result);
+    },
+    onComplete: (results) => {
+      manager.emit("healthcheck:complete", { results });
+    },
+  });
   manager.setHealthCheckResults(healthResults);
 
   // 5. MCP サーバー起動（stdio）
