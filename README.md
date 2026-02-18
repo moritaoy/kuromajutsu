@@ -68,18 +68,25 @@ docker compose run --rm app npx tsc --noEmit
 
 ## Cursor MCP 設定
 
-`.cursor/mcp.json` に追加:
+まず、サーバーを起動します:
+
+```bash
+npm run dev
+```
+
+次に、`.cursor/mcp.json` に以下を追加:
 
 ```json
 {
   "mcpServers": {
     "kuromajutsu": {
-      "command": "npx",
-      "args": ["tsx", "path/to/kuromajutsu/src/index.ts"]
+      "url": "http://localhost:9696/mcp"
     }
   }
 }
 ```
+
+**注意**: サーバーが起動している必要があります。サーバーを停止すると MCP 接続も切断されます。
 
 ## 使い方
 
@@ -98,7 +105,7 @@ Cursor Agent から MCP ツール経由で操作する。
 ## 技術スタック
 
 - TypeScript / Node.js
-- MCP SDK (`@modelcontextprotocol/sdk`, stdio)
+- MCP SDK (`@modelcontextprotocol/sdk`, HTTP トランスポート)
 - WebSocket (`ws`)
 - React SPA (CDN, ビルドステップなし)
 - Docker / Docker Compose（テスト・ビルド用）
