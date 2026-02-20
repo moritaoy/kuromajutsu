@@ -486,7 +486,7 @@ private extractFileChanges(event: StreamEvent): {
 ## AgentManager と AgentExecutor の連携フロー
 
 ```
-MCPツール(run_agent)
+MCPツール(run_agents)
     │
     ▼
 AgentManager.startAgent()

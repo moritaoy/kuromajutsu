@@ -530,7 +530,7 @@ interface HealthStatusProps {
 | `healthcheck:complete` | 全体チェック完了 | 全チェック完了時 | `{ results: HealthCheckResult[] }` |
 | `group:created` | グループ作成通知 | `create_group` 呼び出し時 | `GroupDefinition` |
 | `group:deleted` | グループ削除通知 | `delete_group` 呼び出し時 | `{ groupId }` |
-| `agent:created` | Agent 作成通知 | `run_agent` 呼び出し時 | `AgentState` |
+| `agent:created` | Agent 作成通知 | `run_agents` / `run_sequential` 呼び出し時 | `AgentState` |
 | `agent:status_update` | Agent 状態更新 | stream-json イベント受信時 | `Partial<AgentState> & { agentId }` |
 | `agent:completed` | Agent 完了通知 | Agent プロセス終了時 | `AgentState` |
 | `agent:result_reported` | 結果登録通知 | `report_result` 呼び出し時 | `AgentResult` |

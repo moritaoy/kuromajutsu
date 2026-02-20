@@ -26,6 +26,7 @@ function createTestConfig(): AppConfig {
       {
         id: "impl-code",
         name: "コード実装者",
+        description: "コードの実装・修正を行う",
         model: "claude-4-sonnet",
         systemPrompt: "You are a code implementer.",
         healthCheckPrompt: "OK",
@@ -41,6 +42,18 @@ describe("wait_agent", () => {
   beforeEach(() => {
     config = createTestConfig();
     manager = new AgentManager(config);
+  });
+
+  it("空の agentIds を渡した場合 EMPTY_AGENT_IDS エラーを返す（形式: { error: true, code, message }, isError: true）", async () => {
+    const result = await handleWaitAgent(manager, {
+      agentIds: [],
+    });
+
+    expect(result.isError).toBe(true);
+    const data = JSON.parse(result.content[0].text);
+    expect(data.error).toBe(true);
+    expect(data.code).toBe("EMPTY_AGENT_IDS");
+    expect(typeof data.message).toBe("string");
   });
 
   it("存在しない Agent ID の場合 AGENT_NOT_FOUND エラーを返す", async () => {

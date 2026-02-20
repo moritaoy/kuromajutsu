@@ -95,7 +95,7 @@ Cursor Agent から MCP ツール経由で操作する。
 ```
 1. list_roles          → 利用可能な職種・モデルを確認
 2. create_group        → グループを作成（description を指定）
-3. run_agent           → Agent を起動（groupId, role, prompt を指定）
+3. run_agents          → Agent を一括起動（groupId, agents を指定）
 4. wait_agent          → 完了を待機（agentIds を指定）
 5. get_agent_status    → 詳細状況を確認
 6. report_result       → 結果を登録（Agent 自身が呼び出す）

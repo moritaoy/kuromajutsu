@@ -6,29 +6,22 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppConfig } from "../../types/index.js";
 import type { AgentManager } from "../../agent/manager.js";
+import { errorResponse } from "./error-response.js";
 
 /** wait_agent ツールのハンドラ（テスト用にエクスポート） */
 export async function handleWaitAgent(
   manager: AgentManager,
   args: { agentIds: string[]; timeout_ms?: number; mode?: "all" | "any" },
 ) {
+  if (args.agentIds.length === 0) {
+    return errorResponse("EMPTY_AGENT_IDS", "agentIds 配列が空です。1 件以上指定してください");
+  }
+
   // 各 agentId の存在チェック
   for (const id of args.agentIds) {
     const agent = manager.getAgent(id);
     if (!agent) {
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              error: true,
-              code: "AGENT_NOT_FOUND",
-              message: `Agent '${id}' が見つかりません`,
-            }),
-          },
-        ],
-        isError: true as const,
-      };
+      return errorResponse("AGENT_NOT_FOUND", `Agent '${id}' が見つかりません`);
     }
   }
 

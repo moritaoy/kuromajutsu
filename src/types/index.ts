@@ -9,6 +9,9 @@
 /** グループのステータス */
 export type GroupStatus = "active" | "deleted";
 
+/** グループの実行モード */
+export type GroupMode = "concurrent" | "sequential" | "magentic";
+
 /** グループ定義 */
 export interface GroupDefinition {
   /** 一意識別子（`grp-{unixTimestamp}-{random4hex}` 形式） */
@@ -17,10 +20,16 @@ export interface GroupDefinition {
   description: string;
   /** グループのステータス */
   status: GroupStatus;
+  /** 実行モード */
+  mode: GroupMode;
   /** 作成日時（ISO 8601） */
   createdAt: string;
   /** 所属する Agent ID の一覧 */
   agentIds: string[];
+  /** 親グループ ID（Magentic モードの子グループで設定） */
+  parentGroupId?: string;
+  /** Orchestrator Agent ID（Magentic モードの親グループで設定） */
+  orchestratorAgentId?: string;
 }
 
 // --------------------------------------------------
@@ -33,6 +42,8 @@ export interface RoleDefinition {
   id: string;
   /** 表示名 */
   name: string;
+  /** 職種の概要と使いどころの説明（list_roles で返却される） */
+  description: string;
   /** Agent に渡すシステムプロンプト */
   systemPrompt: string;
   /** 使用する LLM モデル名（Cursor CLI の -m オプションに渡す値） */
@@ -110,6 +121,64 @@ export interface AgentState {
   editedFiles: string[];
   /** 新規作成したファイル一覧（stream-json から自動収集） */
   createdFiles: string[];
+  /** Sequential モードでのステージインデックス（0始まり） */
+  stageIndex?: number;
+  /** 作業ディレクトリ（run_agents / run_sequential で指定された値を保持） */
+  workingDirectory?: string;
+  /** タイムアウト（ミリ秒。run_agents / run_sequential で指定された値を保持） */
+  timeout_ms?: number;
+}
+
+// --------------------------------------------------
+// Sequential 実行計画
+// --------------------------------------------------
+
+/** run_agents / run_sequential で投入する個別タスク定義 */
+export interface TaskDefinition {
+  /** 職種 ID */
+  role: string;
+  /** Agent に渡すユーザープロンプト */
+  prompt: string;
+  /** 作業ディレクトリ */
+  workingDirectory?: string;
+  /** タイムアウト（ミリ秒） */
+  timeout_ms?: number;
+}
+
+/** Sequential モードのステージ定義（各ステージ内は並列実行） */
+export interface StageDefinition {
+  tasks: TaskDefinition[];
+}
+
+/** Sequential 実行計画（AgentManager 内部で管理） */
+export interface SequentialPlan {
+  /** ステージ配列（各ステージに所属する Agent ID を保持） */
+  stages: Array<{
+    stageIndex: number;
+    agentIds: string[];
+  }>;
+  /** 現在実行中のステージインデックス（-1 = 未開始） */
+  currentStageIndex: number;
+}
+
+/** Magentic 実行設定（run_magentic で指定されるパラメータを保持） */
+export interface MagenticConfig {
+  /** 達成すべきタスク */
+  task: string;
+  /** 完了条件 */
+  completionCriteria: string;
+  /** 操作範囲 */
+  scope: string;
+  /** 追加制約 */
+  constraints?: string;
+  /** 補足コンテキスト */
+  context?: string;
+  /** 使用可能な職種 ID 一覧 */
+  availableRoles: string[];
+  /** 最大反復回数 */
+  maxIterations: number;
+  /** 現在の反復回数 */
+  currentIteration: number;
 }
 
 /** ツール呼び出し記録 */
@@ -135,8 +204,10 @@ export interface AgentResult {
   groupId: string;
   /** 実行ステータス */
   status: ResultStatus;
-  /** 端的なテキストサマリ */
+  /** 端的なテキストサマリ（1-2文） */
   summary: string;
+  /** 実行結果を整理した構造化レポート */
+  response: string;
   /** 編集したファイルパス一覧 */
   editedFiles: string[];
   /** 新規作成したファイルパス一覧 */
@@ -241,7 +312,10 @@ export type ServerEvent =
   | { type: "healthcheck:role_complete"; data: HealthCheckResult }
   | { type: "healthcheck:complete"; data: { results: HealthCheckResult[] } }
   | { type: "group:created"; data: GroupDefinition }
+  | { type: "group:updated"; data: GroupDefinition }
   | { type: "group:deleted"; data: { groupId: string } }
+  | { type: "group:stage_advanced"; data: { groupId: string; stageIndex: number; totalStages: number } }
+  | { type: "group:magentic_iteration"; data: { groupId: string; iteration: number; maxIterations: number } }
   | { type: "agent:created"; data: AgentState }
   | { type: "agent:status_update"; data: Partial<AgentState> & { agentId: string } }
   | { type: "agent:completed"; data: AgentState }

@@ -7,13 +7,15 @@ import { useReducer, useCallback } from "react";
 
 /** 初期状態 */
 const initialState = {
-  groups: {},      // groupId → GroupDefinition
-  agents: {},      // agentId → AgentState
+  groups: {},       // groupId → GroupDefinition
+  agents: {},       // agentId → AgentState
   healthChecks: {}, // roleId → HealthCheckResult
   config: null,
   serverStatus: "connecting",
   serverStartedAt: null,
   availableModels: [], // 利用可能モデル一覧
+  stageProgress: {},   // groupId → { current: number, total: number }
+  magenticProgress: {}, // groupId → { iteration, maxIterations }
 };
 
 /**
@@ -60,27 +62,95 @@ function agentReducer(state, action) {
     case "healthcheck:complete":
       return updateHealthChecks(state, action.data.results);
 
-    case "group:created":
+    case "group:created": {
+      const group = action.data;
       return {
         ...state,
         groups: {
           ...state.groups,
-          [action.data.id]: action.data,
+          [group.id]: {
+            ...group,
+            mode: group.mode ?? "concurrent",
+            parentGroupId: group.parentGroupId,
+            orchestratorAgentId: group.orchestratorAgentId,
+          },
         },
       };
+    }
+
+    case "group:updated": {
+      const updated = action.data;
+      const existing = state.groups[updated.id];
+      if (!existing) return state;
+      return {
+        ...state,
+        groups: {
+          ...state.groups,
+          [updated.id]: { ...existing, ...updated },
+        },
+      };
+    }
+
+    case "group:magentic_iteration": {
+      const { groupId, iteration, maxIterations } = action.data;
+      return {
+        ...state,
+        magenticProgress: {
+          ...state.magenticProgress,
+          [groupId]: { iteration, maxIterations },
+        },
+      };
+    }
+
+    case "group:stage_advanced": {
+      const { groupId, stageIndex, totalStages } = action.data;
+      return {
+        ...state,
+        stageProgress: {
+          ...state.stageProgress,
+          [groupId]: { current: stageIndex, total: totalStages },
+        },
+      };
+    }
 
     case "group:deleted": {
       const groupId = action.data.groupId;
-      // グループを state から削除
-      const groups = { ...state.groups };
-      delete groups[groupId];
-      // グループに所属する Agent も削除
+      const group = state.groups[groupId];
+      if (!group) return state;
+
+      const groups = {
+        ...state.groups,
+        [groupId]: { ...group, status: "deleted" },
+      };
+
       const agents = { ...state.agents };
-      for (const [agentId, agent] of Object.entries(agents)) {
-        if (agent.groupId === groupId) {
-          delete agents[agentId];
+
+      const deletedGroupIds = new Set(
+        Object.values(groups)
+          .filter((g) => g.status === "deleted")
+          .map((g) => g.id),
+      );
+      const historyAgents = Object.values(agents)
+        .filter((a) => deletedGroupIds.has(a.groupId))
+        .sort(
+          (a, b) =>
+            new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+        );
+
+      const MAX_HISTORY = 20;
+      if (historyAgents.length > MAX_HISTORY) {
+        for (const agent of historyAgents.slice(MAX_HISTORY)) {
+          delete agents[agent.agentId];
         }
       }
+
+      for (const gid of deletedGroupIds) {
+        const hasAgents = Object.values(agents).some((a) => a.groupId === gid);
+        if (!hasAgents) {
+          delete groups[gid];
+        }
+      }
+
       return { ...state, groups, agents };
     }
 

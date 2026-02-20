@@ -4,11 +4,14 @@
 
 import { createElement as h, useState, useMemo } from "react";
 
-/** ステータスのラベル・バッジクラス */
+/** ステータスのラベル・バッジクラス（AgentResult.status + AgentState.status 両対応） */
 const STATUS_MAP = {
   success: { label: "\u2705 成功", cls: "success" },
+  completed: { label: "\u2705 成功", cls: "success" },
   failure: { label: "\u274C 失敗", cls: "failure" },
+  failed: { label: "\u274C 失敗", cls: "failure" },
   timeout: { label: "\u26A0 タイムアウト", cls: "timeout" },
+  timedOut: { label: "\u26A0 タイムアウト", cls: "timeout" },
   cancelled: { label: "\u23F9 キャンセル", cls: "cancelled" },
 };
 
@@ -19,6 +22,7 @@ export function HistoryTable({ agents, groups }) {
   const [filterGroup, setFilterGroup] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterRole, setFilterRole] = useState("all");
+  const [expandedId, setExpandedId] = useState(null);
 
   // 完了済み Agent のみフィルタ（result があるもの、または completed/failed/timedOut/resultReported）
   const completedAgents = useMemo(() => {
@@ -114,35 +118,56 @@ export function HistoryTable({ agents, groups }) {
         ),
       ),
       h("tbody", null,
-        filtered.map((agent) => {
+        filtered.flatMap((agent) => {
           const result = agent.result;
           const status = result ? result.status : agent.status;
           const statusInfo = STATUS_MAP[status] || { label: status, cls: "" };
-          const durationMs = result ? result.duration_ms : agent.elapsed_ms;
+          const durationMs = (result && result.duration_ms) || agent.elapsed_ms;
           const durationSec = durationMs ? (durationMs / 1000).toFixed(1) + "s" : "-";
           const timestamp = result ? result.timestamp : agent.startedAt;
           const summary = result ? result.summary : (agent.lastAssistantMessage || "-");
+          const responseText = result ? result.response : (agent.lastAssistantMessage || null);
           const groupDesc = groups[agent.groupId]
             ? groups[agent.groupId].description
             : agent.groupId;
+          const isExpanded = expandedId === agent.agentId;
 
-          return h("tr", { key: agent.agentId },
-            h("td", {
-              style: { fontFamily: "'SF Mono', Consolas, monospace", fontSize: "12px" },
-            }, agent.agentId),
-            h("td", null, groupDesc),
-            h("td", null, agent.role),
-            h("td", null,
-              h("span", { className: `status-badge ${statusInfo.cls}` }, statusInfo.label),
+          const rows = [
+            h("tr", {
+              key: agent.agentId,
+              className: `history-row ${isExpanded ? "expanded" : ""} ${responseText ? "has-response" : ""}`,
+              onClick: () => responseText && setExpandedId(isExpanded ? null : agent.agentId),
+              style: responseText ? { cursor: "pointer" } : {},
+            },
+              h("td", {
+                style: { fontFamily: "'SF Mono', Consolas, monospace", fontSize: "12px" },
+              }, agent.agentId),
+              h("td", null, groupDesc),
+              h("td", null, agent.role),
+              h("td", null,
+                h("span", { className: `status-badge ${statusInfo.cls}` }, statusInfo.label),
+              ),
+              h("td", {
+                style: { maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+              }, summary),
+              h("td", null, durationSec),
+              h("td", { style: { fontSize: "12px", color: "var(--text-secondary)" } },
+                new Date(timestamp).toLocaleString("ja-JP"),
+              ),
             ),
-            h("td", {
-              style: { maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-            }, summary),
-            h("td", null, durationSec),
-            h("td", { style: { fontSize: "12px", color: "var(--text-secondary)" } },
-              new Date(timestamp).toLocaleString("ja-JP"),
-            ),
-          );
+          ];
+
+          if (isExpanded && responseText) {
+            rows.push(
+              h("tr", { key: `${agent.agentId}-response`, className: "history-response-row" },
+                h("td", { colSpan: 7 },
+                  h("div", { className: "history-response-content" }, responseText),
+                ),
+              ),
+            );
+          }
+
+          return rows;
         }),
       ),
     ),

@@ -15,9 +15,14 @@ import type {
   AgentStatus,
   AgentResult,
   GroupDefinition,
+  GroupMode,
   HealthCheckResult,
   AppConfig,
   RoleDefinition,
+  TaskDefinition,
+  StageDefinition,
+  SequentialPlan,
+  MagenticConfig,
 } from "../types/index.js";
 import { AgentExecutor } from "./executor.js";
 import { buildToolPromptBlock } from "./tools.js";
@@ -43,6 +48,9 @@ const DONE_STATUSES: AgentStatus[] = [
   "resultReported",
 ];
 
+/** 削除済みグループに残す履歴 Agent の最大件数 */
+const MAX_HISTORY_AGENTS = 20;
+
 // --------------------------------------------------
 // AgentManager
 // --------------------------------------------------
@@ -67,6 +75,12 @@ export class AgentManager extends EventEmitter {
   /** Agent 完了待ちの Promise resolver: agentId → resolve[] */
   private waitResolvers: Map<string, Array<() => void>>;
 
+  /** Sequential 実行計画: groupId → SequentialPlan */
+  private sequentialPlans: Map<string, SequentialPlan>;
+
+  /** Magentic 実行設定: groupId → MagenticConfig */
+  private magenticConfigs: Map<string, MagenticConfig>;
+
   /** AgentExecutor インスタンス（内部保持） */
   private executor: AgentExecutor;
 
@@ -77,6 +91,8 @@ export class AgentManager extends EventEmitter {
     this.healthCheckResults = new Map();
     this.availableModels = [];
     this.waitResolvers = new Map();
+    this.sequentialPlans = new Map();
+    this.magenticConfigs = new Map();
     this.executor = new AgentExecutor();
   }
 
@@ -85,13 +101,19 @@ export class AgentManager extends EventEmitter {
   // ==================================================
 
   /** グループを作成し Map に登録する */
-  createGroup(description: string): GroupDefinition {
+  createGroup(
+    description: string,
+    mode: GroupMode = "concurrent",
+    parentGroupId?: string,
+  ): GroupDefinition {
     const group: GroupDefinition = {
       id: this.generateGroupId(),
       description,
       status: "active",
+      mode,
       createdAt: new Date().toISOString(),
       agentIds: [],
+      parentGroupId,
     };
 
     this.groups.set(group.id, group);
@@ -104,7 +126,7 @@ export class AgentManager extends EventEmitter {
     return this.groups.get(groupId);
   }
 
-  /** グループを削除する（status を "deleted" に変更） */
+  /** グループを削除する（status を "deleted" に変更、完了済み Agent は履歴として保持） */
   deleteGroup(groupId: string): void {
     const group = this.groups.get(groupId);
     if (!group) {
@@ -114,12 +136,21 @@ export class AgentManager extends EventEmitter {
       throw new Error(`グループは既に削除されています: ${groupId}`);
     }
 
-    group.status = "deleted";
-
-    // グループに属する Agent のデータも削除する
-    for (const agentId of group.agentIds) {
-      this.agents.delete(agentId);
+    // Magentic グループの場合、子グループ（parentGroupId が一致する）を連鎖的に削除
+    if (group.mode === "magentic") {
+      const childGroups = Array.from(this.groups.values()).filter(
+        (g) => g.parentGroupId === groupId && g.status === "active",
+      );
+      for (const child of childGroups) {
+        this.deleteGroup(child.id);
+      }
     }
+
+    group.status = "deleted";
+    this.sequentialPlans.delete(groupId);
+    this.magenticConfigs.delete(groupId);
+
+    this.trimDeletedGroupAgents(MAX_HISTORY_AGENTS);
 
     this.emit("group:deleted", { groupId });
   }
@@ -136,6 +167,16 @@ export class AgentManager extends EventEmitter {
     );
   }
 
+  /** Magentic 設定を登録する */
+  setMagenticConfig(groupId: string, config: MagenticConfig): void {
+    this.magenticConfigs.set(groupId, config);
+  }
+
+  /** Magentic 設定を取得する */
+  getMagenticConfig(groupId: string): MagenticConfig | undefined {
+    return this.magenticConfigs.get(groupId);
+  }
+
   // ==================================================
   // Agent 管理
   // ==================================================
@@ -147,7 +188,12 @@ export class AgentManager extends EventEmitter {
     groupId: string,
     role: RoleDefinition,
     prompt: string,
-    options?: { workingDirectory?: string; timeout_ms?: number },
+    options?: {
+      workingDirectory?: string;
+      timeout_ms?: number;
+      /** 指定時は buildFullPrompt をスキップし、この文字列をそのまま使用（Magentic Orchestrator 用） */
+      prebuiltFullPrompt?: string;
+    },
   ): AgentState {
     // グループの存在・アクティブチェック
     const group = this.groups.get(groupId);
@@ -195,7 +241,9 @@ export class AgentManager extends EventEmitter {
     this.emit("agent:created", agent);
 
     // AgentExecutor でプロセス起動
-    const fullPrompt = this.buildFullPrompt(role, agentId, groupId, prompt);
+    const fullPrompt =
+      options?.prebuiltFullPrompt ??
+      this.buildFullPrompt(role, agentId, groupId, prompt);
     const timeout_ms =
       options?.timeout_ms ?? this.config.agent.defaultTimeout_ms ?? undefined;
 
@@ -228,6 +276,296 @@ export class AgentManager extends EventEmitter {
     }
 
     return agent;
+  }
+
+  /**
+   * 複数の Agent を一括起動する（Concurrent モード用）。
+   * 全 Agent の起動を試み、結果を配列で返す。
+   */
+  startAgents(
+    groupId: string,
+    tasks: TaskDefinition[],
+  ): AgentState[] {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      throw new Error(`グループが見つかりません: ${groupId}`);
+    }
+    if (group.status !== "active") {
+      throw new Error(`グループがアクティブではありません: ${groupId}`);
+    }
+    if (group.mode !== "concurrent") {
+      throw new Error(`グループのモードが concurrent ではありません: ${group.mode}`);
+    }
+
+    const running = this.getRunningCount();
+    if (running + tasks.length > this.config.agent.maxConcurrent) {
+      throw new Error(
+        `maxConcurrent (${this.config.agent.maxConcurrent}) を超えます。現在 ${running} Agent 実行中、${tasks.length} 台の起動を要求。`,
+      );
+    }
+
+    const results: AgentState[] = [];
+    for (const task of tasks) {
+      const roleDef = this.config.roles.find((r) => r.id === task.role);
+      if (!roleDef) {
+        throw new Error(`職種 '${task.role}' が見つかりません`);
+      }
+      const agent = this.startAgent(groupId, roleDef, task.prompt, {
+        workingDirectory: task.workingDirectory,
+        timeout_ms: task.timeout_ms,
+      });
+      results.push(agent);
+    }
+    return results;
+  }
+
+  /**
+   * Sequential 実行計画を投入する。
+   * 全ステージの全 Agent を queued で登録し、Stage 0 の Agent のみ起動する。
+   */
+  submitSequential(
+    groupId: string,
+    stages: StageDefinition[],
+  ): { plan: SequentialPlan; agents: AgentState[] } {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      throw new Error(`グループが見つかりません: ${groupId}`);
+    }
+    if (group.status !== "active") {
+      throw new Error(`グループがアクティブではありません: ${groupId}`);
+    }
+    if (group.mode !== "sequential") {
+      throw new Error(`グループのモードが sequential ではありません: ${group.mode}`);
+    }
+    if (this.sequentialPlans.has(groupId)) {
+      throw new Error(`グループ '${groupId}' には既に実行計画が登録されています`);
+    }
+
+    const maxStageTasks = Math.max(...stages.map((s) => s.tasks.length));
+    const running = this.getRunningCount();
+    if (running + maxStageTasks > this.config.agent.maxConcurrent) {
+      throw new Error(
+        `最大ステージのタスク数 (${maxStageTasks}) が maxConcurrent (${this.config.agent.maxConcurrent}) の残枠 (${this.config.agent.maxConcurrent - running}) を超えます`,
+      );
+    }
+
+    const plan: SequentialPlan = {
+      stages: [],
+      currentStageIndex: -1,
+    };
+    const allAgents: AgentState[] = [];
+
+    for (let si = 0; si < stages.length; si++) {
+      const stageAgentIds: string[] = [];
+      for (const task of stages[si].tasks) {
+        const roleDef = this.config.roles.find((r) => r.id === task.role);
+        if (!roleDef) {
+          throw new Error(`職種 '${task.role}' が見つかりません`);
+        }
+
+        const agentId = this.generateAgentId(roleDef.id);
+        const now = new Date().toISOString();
+
+        const agent: AgentState = {
+          agentId,
+          groupId,
+          role: roleDef.id,
+          model: roleDef.model,
+          status: "queued",
+          startedAt: now,
+          elapsed_ms: 0,
+          toolCallCount: 0,
+          recentToolCalls: [],
+          result: null,
+          prompt: task.prompt,
+          editedFiles: [],
+          createdFiles: [],
+          stageIndex: si,
+          workingDirectory: task.workingDirectory,
+          timeout_ms: task.timeout_ms,
+        };
+
+        this.agents.set(agentId, agent);
+        group.agentIds.push(agentId);
+        stageAgentIds.push(agentId);
+        allAgents.push(agent);
+        this.emit("agent:created", agent);
+      }
+      plan.stages.push({ stageIndex: si, agentIds: stageAgentIds });
+    }
+
+    this.sequentialPlans.set(groupId, plan);
+
+    // Stage 0 を起動
+    this.advanceSequentialStage(groupId);
+
+    return { plan, agents: allAgents };
+  }
+
+  /** Sequential 実行計画を取得する */
+  getSequentialPlan(groupId: string): SequentialPlan | undefined {
+    return this.sequentialPlans.get(groupId);
+  }
+
+  /**
+   * Magentic グループの Orchestrator Agent を起動する。
+   * run_magentic ツールから呼ばれる。
+   * orchestratorAgentId の設定と group:updated イベント発行を一元管理する。
+   */
+  startMagenticOrchestrator(
+    groupId: string,
+    orchestratorRole: RoleDefinition,
+    prompt: string,
+    options?: { timeout_ms?: number },
+  ): AgentState {
+    const group = this.groups.get(groupId);
+    if (!group) {
+      throw new Error(`グループが見つかりません: ${groupId}`);
+    }
+    if (group.status !== "active") {
+      throw new Error(`グループがアクティブではありません: ${groupId}`);
+    }
+    if (group.mode !== "magentic") {
+      throw new Error(`グループのモードが magentic ではありません: ${group.mode}`);
+    }
+
+    const agent = this.startAgent(groupId, orchestratorRole, prompt, {
+      timeout_ms: options?.timeout_ms,
+    });
+
+    group.orchestratorAgentId = agent.agentId;
+    this.emit("group:updated", group);
+    return agent;
+  }
+
+  /**
+   * Orchestrator 用の 7 層プロンプトを構築する。
+   */
+  buildMagenticOrchestratorPrompt(
+    role: RoleDefinition,
+    agentId: string,
+    groupId: string,
+    config: MagenticConfig,
+  ): string {
+    const metadataBlock = [
+      "---",
+      "【kuromajutsu システム情報】",
+      "",
+      `あなたは kuromajutsu Agent 管理システムによって起動されたサブ Agent です。`,
+      "",
+      `- Agent ID: ${agentId}`,
+      `- Group ID: ${groupId}`,
+      `- Role: ${role.id}`,
+      "",
+      `【重要: タスク完了時の結果報告】`,
+      `タスクが完了したら、必ず kuromajutsu MCP の \`report_result\` ツールを呼び出して結果を報告してください。`,
+      `以下のパラメータを指定してください:`,
+      "",
+      "```",
+      `agentId: "${agentId}"`,
+      `status: "success" または "failure"`,
+      `summary: "実行結果の要約（1-2文で簡潔に）"`,
+      `response: "実行結果の詳細レポート（下記ガイドライン参照）"`,
+      `editedFiles: ["編集したファイルパスの配列"]  // 省略可`,
+      `createdFiles: ["新規作成したファイルパスの配列"]  // 省略可`,
+      `errorMessage: "エラーメッセージ"  // 失敗時のみ`,
+      "```",
+      "",
+      `**response のガイドライン:**`,
+      `response は生の実行ログではなく、実行結果を適切にまとめた構造化レポートです。`,
+      `メイン Agent や人間が読んで内容を正確に把握できるよう、以下を整理して記載してください:`,
+      `- 何を実施したか（実施内容）`,
+      `- 結果どうなったか（成果・変更点）`,
+      `- 判断や選択の理由（なぜそうしたか）`,
+      `- 注意点・懸念事項（あれば）`,
+      `- 次のステップへの申し送り事項（あれば）`,
+      "",
+      `report_result を呼ばないとメイン Agent が結果を受け取れません。タスクの成否に関わらず必ず呼び出してください。`,
+      "---",
+    ].join("\n");
+
+    const toolGuideBlock = [
+      "",
+      "---",
+      "【Orchestrator ツール使用ガイド】",
+      "",
+      "あなたは以下の kuromajutsu MCP ツールを使用してサブ Agent を管理できます:",
+      "",
+      "- **create_group**: 子グループを作成する。必ず parentGroupId にこのグループの ID を指定すること。",
+      "- **run_agents**: 子グループ内で Agent を一括起動する。",
+      "- **wait_agent**: 指定した Agent の完了を待機する。",
+      "- **get_agent_status**: Agent の状態を取得する。",
+      "- **list_agents**: Agent 一覧を取得する。",
+      "- **delete_group**: グループを削除する。",
+      "",
+      "---",
+    ].join("\n");
+
+    const taskBlock = [
+      "",
+      "---",
+      "【タスク定義】",
+      "",
+      config.task,
+      "",
+      "---",
+    ].join("\n");
+
+    const completionBlock = [
+      "",
+      "---",
+      "【完了条件】",
+      "",
+      config.completionCriteria,
+      "",
+      "---",
+    ].join("\n");
+
+    const scopeParts: string[] = [config.scope];
+    if (config.constraints) {
+      scopeParts.push(`制約: ${config.constraints}`);
+    }
+    if (config.context) {
+      scopeParts.push(`補足コンテキスト: ${config.context}`);
+    }
+    const scopeBlock = [
+      "",
+      "---",
+      "【操作範囲・制約】",
+      "",
+      scopeParts.join("\n\n"),
+      "",
+      "---",
+    ].join("\n");
+
+    const roleInfos = config.availableRoles.map((roleId) => {
+      const r = this.config.roles.find((x) => x.id === roleId);
+      return r
+        ? `- ${r.id}: ${r.name} — ${r.description}`
+        : `- ${roleId}: (未定義)`;
+    });
+    const paramsBlock = [
+      "",
+      "---",
+      "【実行パラメータ】",
+      "",
+      "利用可能な職種:",
+      ...roleInfos,
+      "",
+      `最大反復回数: ${config.maxIterations}`,
+      "",
+      "---",
+    ].join("\n");
+
+    return [
+      role.systemPrompt,
+      metadataBlock,
+      toolGuideBlock,
+      taskBlock,
+      completionBlock,
+      scopeBlock,
+      paramsBlock,
+    ].join("\n\n");
   }
 
   /** Agent の状態を取得する（存在しなければ undefined） */
@@ -384,6 +722,7 @@ export class AgentManager extends EventEmitter {
     reportData: {
       status: "success" | "failure" | "timeout" | "cancelled";
       summary: string;
+      response: string;
       editedFiles?: string[];
       createdFiles?: string[];
       errorMessage?: string;
@@ -415,6 +754,7 @@ export class AgentManager extends EventEmitter {
       groupId: agent.groupId,
       status: reportData.status,
       summary: reportData.summary,
+      response: reportData.response,
       editedFiles: mergedEditedFiles,
       createdFiles: mergedCreatedFiles,
       duration_ms: agent.elapsed_ms,
@@ -471,6 +811,41 @@ export class AgentManager extends EventEmitter {
   // 内部メソッド
   // ==================================================
 
+  /**
+   * 削除済みグループの Agent を maxHistory 件に制限する。
+   * 古い Agent から削除し、Agent がなくなった削除済みグループも除去する。
+   */
+  private trimDeletedGroupAgents(maxHistory: number): void {
+    const deletedGroupIds = new Set(
+      Array.from(this.groups.values())
+        .filter((g) => g.status === "deleted")
+        .map((g) => g.id),
+    );
+
+    const historyAgents = Array.from(this.agents.values())
+      .filter((a) => deletedGroupIds.has(a.groupId))
+      .sort(
+        (a, b) =>
+          new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
+      );
+
+    if (historyAgents.length > maxHistory) {
+      const toRemove = historyAgents.slice(maxHistory);
+      for (const agent of toRemove) {
+        this.agents.delete(agent.agentId);
+      }
+    }
+
+    for (const groupId of deletedGroupIds) {
+      const hasAgents = Array.from(this.agents.values()).some(
+        (a) => a.groupId === groupId,
+      );
+      if (!hasAgents) {
+        this.groups.delete(groupId);
+      }
+    }
+  }
+
   /** 状態遷移が有効かを判定する */
   private isValidTransition(
     from: AgentStatus,
@@ -479,7 +854,7 @@ export class AgentManager extends EventEmitter {
     return VALID_TRANSITIONS[from]?.includes(to) ?? false;
   }
 
-  /** Agent の完了処理（waitResolvers の resolve、イベント通知） */
+  /** Agent の完了処理（waitResolvers の resolve、イベント通知、Sequential ステージ進行） */
   private handleAgentCompletion(agentId: string): void {
     const agent = this.agents.get(agentId);
     if (!agent) return;
@@ -493,6 +868,162 @@ export class AgentManager extends EventEmitter {
       resolve();
     }
     this.waitResolvers.delete(agentId);
+
+    // Sequential グループの場合、ステージ進行を試みる
+    const group = this.groups.get(agent.groupId);
+    if (group?.mode === "sequential") {
+      this.advanceSequentialStage(agent.groupId);
+    }
+  }
+
+  /**
+   * Sequential ステージを進行させる。
+   * - currentStageIndex === -1 の場合: Stage 0 を起動
+   * - 現ステージの全 Agent が完了系の場合: 次ステージを起動
+   */
+  private advanceSequentialStage(groupId: string): void {
+    const plan = this.sequentialPlans.get(groupId);
+    if (!plan) return;
+
+    // 初回起動 (currentStageIndex === -1)
+    if (plan.currentStageIndex === -1) {
+      plan.currentStageIndex = 0;
+      const firstStage = plan.stages[0];
+      if (!firstStage) return;
+      for (const agentId of firstStage.agentIds) {
+        this.launchQueuedAgent(agentId);
+      }
+      this.emit("group:stage_advanced", {
+        groupId,
+        stageIndex: 0,
+        totalStages: plan.stages.length,
+      });
+      return;
+    }
+
+    // 現ステージの全 Agent が完了しているか確認
+    const currentStage = plan.stages[plan.currentStageIndex];
+    if (!currentStage) return;
+
+    const allDone = currentStage.agentIds.every((id) => {
+      const a = this.agents.get(id);
+      return a && DONE_STATUSES.includes(a.status);
+    });
+    if (!allDone) return;
+
+    // 次のステージへ
+    plan.currentStageIndex++;
+    if (plan.currentStageIndex >= plan.stages.length) return;
+
+    const nextStage = plan.stages[plan.currentStageIndex];
+    const running = this.getRunningCount();
+    const nextStageSize = nextStage.agentIds.length;
+    if (running + nextStageSize > this.config.agent.maxConcurrent) {
+      console.warn(
+        `[manager] maxConcurrent 超過のためステージ ${plan.currentStageIndex} の起動を保留 (running=${running}, staged=${nextStageSize}, max=${this.config.agent.maxConcurrent})`,
+      );
+      plan.currentStageIndex--;
+      return;
+    }
+
+    // 前ステージの結果を収集
+    const previousStageResults = this.collectStageResults(
+      currentStage.agentIds,
+    );
+
+    // 次ステージの Agent を起動（前ステージ結果をプロンプトに注入）
+    for (const agentId of nextStage.agentIds) {
+      this.launchQueuedAgent(agentId, previousStageResults);
+    }
+
+    this.emit("group:stage_advanced", {
+      groupId,
+      stageIndex: plan.currentStageIndex,
+      totalStages: plan.stages.length,
+    });
+  }
+
+  /**
+   * queued 状態の Agent を実際に起動する。
+   * Sequential モードで使用。
+   */
+  private launchQueuedAgent(
+    agentId: string,
+    previousStageResults?: AgentResult[],
+  ): void {
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.status !== "queued") return;
+
+    const roleDef = this.config.roles.find((r) => r.id === agent.role);
+    if (!roleDef) {
+      this.updateAgentState(agentId, { status: "failed" });
+      return;
+    }
+
+    const fullPrompt = this.buildFullPrompt(
+      roleDef,
+      agentId,
+      agent.groupId,
+      agent.prompt ?? "",
+      previousStageResults,
+    );
+    const timeout_ms =
+      agent.timeout_ms ?? this.config.agent.defaultTimeout_ms ?? undefined;
+
+    try {
+      const pid = this.executor.execute(
+        agentId,
+        {
+          model: roleDef.model,
+          prompt: fullPrompt,
+          workingDirectory: agent.workingDirectory,
+          timeout_ms,
+        },
+        {
+          onStreamEvent: (event) => {
+            this.handleStreamEvent(agentId, event);
+          },
+          onExit: (exitCode, signal) => {
+            this.handleProcessExit(agentId, exitCode, signal);
+          },
+          onError: (error) => {
+            this.handleProcessError(agentId, error);
+          },
+        },
+      );
+      agent.pid = pid;
+    } catch {
+      this.updateAgentState(agentId, { status: "failed" });
+    }
+  }
+
+  /** 指定 Agent ID 群の結果を収集する（前ステージ結果注入用） */
+  private collectStageResults(agentIds: string[]): AgentResult[] {
+    const results: AgentResult[] = [];
+    for (const id of agentIds) {
+      const agent = this.agents.get(id);
+      if (!agent) continue;
+
+      if (agent.result) {
+        results.push(agent.result);
+      } else {
+        results.push({
+          agentId: id,
+          groupId: agent.groupId,
+          status: agent.status === "completed" ? "success" : "failure",
+          summary: agent.lastAssistantMessage ?? "(結果報告なし)",
+          response: agent.lastAssistantMessage ?? "(report_result 未呼出)",
+          editedFiles: agent.editedFiles,
+          createdFiles: agent.createdFiles,
+          duration_ms: agent.elapsed_ms,
+          model: agent.model,
+          role: agent.role,
+          toolCallCount: agent.toolCallCount,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+    return results;
   }
 
   /** stream-json イベントのハンドリング */
@@ -587,10 +1118,19 @@ export class AgentManager extends EventEmitter {
 
       case "result":
         if (event.subtype === "success") {
-          this.updateAgentState(agentId, {
-            status: "completed",
-            elapsed_ms: (event.data.duration_ms as number) ?? 0,
-          });
+          const durationMs = (event.data.duration_ms as number) ?? 0;
+          if (DONE_STATUSES.includes(agent.status)) {
+            const patch: Partial<AgentState> = { elapsed_ms: durationMs };
+            if (agent.result && !agent.result.duration_ms) {
+              patch.result = { ...agent.result, duration_ms: durationMs };
+            }
+            this.updateAgentState(agentId, patch);
+          } else {
+            this.updateAgentState(agentId, {
+              status: "completed",
+              elapsed_ms: durationMs,
+            });
+          }
         }
         break;
 
@@ -688,13 +1228,16 @@ export class AgentManager extends EventEmitter {
    * 構造:
    *   1. ロールのシステムプロンプト（設定ファイル由来）
    *   2. kuromajutsu メタデータブロック（agentId, groupId, report_result 指示）
-   *   3. ユーザープロンプト
+   *   3. ツールブロック（ロールにツールが紐付いている場合）
+   *   4. 前ステージ結果ブロック（Sequential モードの Stage 1 以降）
+   *   5. ユーザープロンプト
    */
   buildFullPrompt(
     role: RoleDefinition,
     agentId: string,
     groupId: string,
     userPrompt: string,
+    previousStageResults?: AgentResult[],
   ): string {
     const metadataBlock = [
       "---",
@@ -713,11 +1256,21 @@ export class AgentManager extends EventEmitter {
       "```",
       `agentId: "${agentId}"`,
       `status: "success" または "failure"`,
-      `summary: "実行結果の要約（何を実施し、どうなったか）"`,
+      `summary: "実行結果の要約（1-2文で簡潔に）"`,
+      `response: "実行結果の詳細レポート（下記ガイドライン参照）"`,
       `editedFiles: ["編集したファイルパスの配列"]  // 省略可`,
       `createdFiles: ["新規作成したファイルパスの配列"]  // 省略可`,
       `errorMessage: "エラーメッセージ"  // 失敗時のみ`,
       "```",
+      "",
+      `**response のガイドライン:**`,
+      `response は生の実行ログではなく、実行結果を適切にまとめた構造化レポートです。`,
+      `メイン Agent や人間が読んで内容を正確に把握できるよう、以下を整理して記載してください:`,
+      `- 何を実施したか（実施内容）`,
+      `- 結果どうなったか（成果・変更点）`,
+      `- 判断や選択の理由（なぜそうしたか）`,
+      `- 注意点・懸念事項（あれば）`,
+      `- 次のステップへの申し送り事項（あれば）`,
       "",
       `report_result を呼ばないとメイン Agent が結果を受け取れません。タスクの成否に関わらず必ず呼び出してください。`,
       "---",
@@ -727,6 +1280,31 @@ export class AgentManager extends EventEmitter {
     const toolBlock = buildToolPromptBlock(role.tools ?? []);
     const toolSection = toolBlock ? `\n\n${toolBlock}` : "";
 
-    return `${role.systemPrompt}\n\n${metadataBlock}${toolSection}\n\n${userPrompt}`;
+    // 前ステージ結果ブロック（Sequential モード用）
+    const prevResultsSection = previousStageResults && previousStageResults.length > 0
+      ? `\n\n${this.buildPreviousStageResultsBlock(previousStageResults)}`
+      : "";
+
+    return `${role.systemPrompt}\n\n${metadataBlock}${toolSection}${prevResultsSection}\n\n${userPrompt}`;
+  }
+
+  /** 前ステージの結果をプロンプト注入用テキストに整形する */
+  private buildPreviousStageResultsBlock(results: AgentResult[]): string {
+    const lines = [
+      "---",
+      "【前ステージの実行結果】",
+      "",
+    ];
+
+    for (const r of results) {
+      lines.push(`[Agent: ${r.agentId} (${r.role}) — ${r.status}]`);
+      lines.push(`Summary: ${r.summary}`);
+      lines.push(`Response:`);
+      lines.push(r.response);
+      lines.push("");
+    }
+
+    lines.push("---");
+    return lines.join("\n");
   }
 }

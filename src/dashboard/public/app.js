@@ -20,7 +20,9 @@ import { ModelList } from "./components/ModelList.js";
 // ============================================================
 
 function DashboardPage({ state }) {
-  const groups = Object.values(state.groups).filter((g) => g.status === "active");
+  const groups = Object.values(state.groups).filter(
+    (g) => g.status === "active" && !g.parentGroupId,
+  );
   const agents = state.agents;
 
   if (groups.length === 0 && Object.keys(agents).length === 0) {
@@ -30,7 +32,7 @@ function DashboardPage({ state }) {
         h("div", { className: "empty-state-icon" }, "\uD83E\uDDD9"),
         h("div", { className: "empty-state-text" }, "Agent はまだ実行されていません"),
         h("div", { className: "empty-state-subtext" },
-          "MCP ツール create_group → run_agent で Agent を起動できます",
+          "MCP ツール create_group → run_agents で Agent を起動できます",
         ),
       ),
     );
@@ -46,6 +48,10 @@ function DashboardPage({ state }) {
         key: group.id,
         group,
         agents: groupAgents,
+        allGroups: state.groups,
+        allAgents: state.agents,
+        stageProgress: state.stageProgress,
+        magenticProgress: state.magenticProgress || {},
         defaultExpanded: true,
       });
     }),

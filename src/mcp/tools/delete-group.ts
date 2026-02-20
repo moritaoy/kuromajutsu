@@ -6,19 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppConfig } from "../../types/index.js";
 import type { AgentManager } from "../../agent/manager.js";
-
-/** エラーレスポンスヘルパー */
-function errorResponse(code: string, message: string) {
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify({ error: true, code, message }),
-      },
-    ],
-    isError: true as const,
-  };
-}
+import { errorResponse } from "./error-response.js";
 
 /** delete_group ツールのハンドラ（テスト用にエクスポート） */
 export function handleDeleteGroup(

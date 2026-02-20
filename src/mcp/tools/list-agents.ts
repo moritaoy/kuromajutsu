@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppConfig } from "../../types/index.js";
 import type { AgentManager } from "../../agent/manager.js";
+import { errorResponse } from "./error-response.js";
 
 /** list_agents ツールのハンドラ（テスト用にエクスポート） */
 export function handleListAgents(
@@ -15,6 +16,14 @@ export function handleListAgents(
   const filter: { groupId?: string; status?: string } = {};
   if (args.groupId) filter.groupId = args.groupId;
   if (args.status && args.status !== "all") filter.status = args.status;
+
+  // groupId 指定時はグループの存在を確認する
+  if (args.groupId) {
+    const group = manager.getGroup(args.groupId);
+    if (!group) {
+      return errorResponse("GROUP_NOT_FOUND", `グループ '${args.groupId}' が見つかりません`);
+    }
+  }
 
   const agents = manager.listAgents(
     Object.keys(filter).length > 0 ? filter : undefined,
