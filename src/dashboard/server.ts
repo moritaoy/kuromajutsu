@@ -121,8 +121,19 @@ function setupBroadcast(
   manager.on("group:created", (data) =>
     broadcast({ type: "group:created", data }),
   );
+  manager.on("group:updated", (data) =>
+    broadcast({ type: "group:updated", data }),
+  );
   manager.on("group:deleted", (data) =>
     broadcast({ type: "group:deleted", data }),
+  );
+  manager.on("group:stage_advanced", (data) =>
+    broadcast({ type: "group:stage_advanced", data }),
+  );
+
+  // Magentic 台帳イベント
+  manager.on("group:ledger_updated", (data) =>
+    broadcast({ type: "group:ledger_updated", data }),
   );
 
   // Agent イベント
@@ -196,19 +207,30 @@ function sendInitialState(
     });
   }
 
-  // 4. 既存のグループ情報を再送
+  // 4. 既存のグループ情報を再送（削除済みグループも Agent が残っていれば送信）
   const allGroups = manager.listGroups();
+  const allAgents = manager.listAgents();
+  const groupIdsWithAgents = new Set(allAgents.map((a) => a.groupId));
+
   for (const group of allGroups) {
-    if (group.status === "active") {
+    if (group.status === "active" || groupIdsWithAgents.has(group.id)) {
       sendEvent(ws, { type: "group:created", data: group });
     }
   }
 
-  // 5. 既存の Agent 情報を再送（削除済みグループの Agent は除外）
-  const activeGroupIds = new Set(allGroups.filter((g) => g.status === "active").map((g) => g.id));
-  const agents = manager.listAgents().filter((a) => activeGroupIds.has(a.groupId));
-  for (const agent of agents) {
+  // 5. 既存の Agent 情報を再送（削除済みグループの履歴 Agent も含む）
+  for (const agent of allAgents) {
     sendEvent(ws, { type: "agent:created", data: agent });
+  }
+
+  // 6. Magentic 台帳データを再送
+  for (const group of allGroups) {
+    if (group.status === "active" && group.mode === "magentic") {
+      const ledger = manager.getLedger(group.id);
+      if (ledger) {
+        sendEvent(ws, { type: "group:ledger_updated", data: ledger });
+      }
+    }
   }
 }
 

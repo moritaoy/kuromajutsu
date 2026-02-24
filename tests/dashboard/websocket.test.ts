@@ -22,6 +22,7 @@ function createTestConfig(port: number): AppConfig {
       {
         id: "impl-code",
         name: "コード実装者",
+        description: "コードの実装・修正を行う",
         model: "claude-4-sonnet",
         systemPrompt: "テスト用プロンプト",
         healthCheckPrompt: "Hello",
@@ -204,6 +205,7 @@ describe("WebSocket", () => {
     const role = {
       id: "impl-code",
       name: "コード実装者",
+      description: "コードの実装・修正を行う",
       model: "claude-4-sonnet",
       systemPrompt: "テスト",
       healthCheckPrompt: "Hello",
@@ -233,6 +235,7 @@ describe("WebSocket", () => {
     const role = {
       id: "impl-code",
       name: "コード実装者",
+      description: "コードの実装・修正を行う",
       model: "claude-4-sonnet",
       systemPrompt: "テスト",
       healthCheckPrompt: "Hello",
@@ -266,6 +269,7 @@ describe("WebSocket", () => {
     const role = {
       id: "impl-code",
       name: "コード実装者",
+      description: "コードの実装・修正を行う",
       model: "claude-4-sonnet",
       systemPrompt: "テスト",
       healthCheckPrompt: "Hello",
@@ -364,6 +368,100 @@ describe("WebSocket", () => {
     // エラーなく処理されることを確認（例外が飛ばない）
     await new Promise((r) => setTimeout(r, 200));
     expect(ws.readyState).toBe(WebSocket.OPEN);
+  });
+
+  it("should include parentGroupId and orchestratorAgentId in group:created for magentic group", async () => {
+    await waitForServer(server);
+    const { ws, messages, waitForMessages } = await connectWs(port);
+    clients.push(ws);
+
+    await waitForMessages(2); // server:startup + config:updated
+
+    const parent = manager.createGroup("Magentic 親", "magentic");
+    parent.orchestratorAgentId = "orchestrator-test-1234";
+
+    const child = manager.createGroup("子グループ", "concurrent", parent.id);
+
+    await waitForMessages(4); // + group:created x 2
+
+    const groupMsgs = messages.filter((m) => m.type === "group:created");
+    expect(groupMsgs.length).toBe(2);
+
+    const parentMsg = groupMsgs.find(
+      (m) => m.type === "group:created" && m.data.id === parent.id,
+    );
+    expect(parentMsg).toBeDefined();
+    if (parentMsg && parentMsg.type === "group:created") {
+      expect(parentMsg.data.mode).toBe("magentic");
+    }
+
+    const childMsg = groupMsgs.find(
+      (m) => m.type === "group:created" && m.data.id === child.id,
+    );
+    expect(childMsg).toBeDefined();
+    if (childMsg && childMsg.type === "group:created") {
+      expect(childMsg.data.parentGroupId).toBe(parent.id);
+    }
+  });
+
+  it("should broadcast group:ledger_updated event", async () => {
+    await waitForServer(server);
+    const { ws, messages, waitForMessages } = await connectWs(port);
+    clients.push(ws);
+
+    await waitForMessages(2); // server:startup + config:updated
+
+    const group = manager.createGroup("Magentic テスト", "magentic");
+    await waitForMessages(3); // + group:created
+
+    manager.updateTaskLedger(group.id, {
+      facts: {
+        given: ["事実"],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画"],
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+
+    const ledgerMsg = messages.find((m) => m.type === "group:ledger_updated");
+    expect(ledgerMsg).toBeDefined();
+    if (ledgerMsg && ledgerMsg.type === "group:ledger_updated") {
+      expect(ledgerMsg.data.groupId).toBe(group.id);
+      expect(ledgerMsg.data.taskLedger).toBeDefined();
+    }
+  });
+
+  it("should send ledger data in initial state for existing magentic groups", async () => {
+    await waitForServer(server);
+
+    // 先に Magentic グループと台帳を作成
+    const group = manager.createGroup("Magentic", "magentic");
+    manager.updateTaskLedger(group.id, {
+      facts: {
+        given: ["既存の事実"],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["既存の計画"],
+    });
+
+    // 後からクライアントが接続
+    const { ws, messages, waitForMessages } = await connectWs(port);
+    clients.push(ws);
+
+    await waitForMessages(1);
+    await new Promise((r) => setTimeout(r, 200));
+
+    const ledgerMsg = messages.find((m) => m.type === "group:ledger_updated");
+    expect(ledgerMsg).toBeDefined();
+    if (ledgerMsg && ledgerMsg.type === "group:ledger_updated") {
+      expect(ledgerMsg.data.groupId).toBe(group.id);
+      expect(ledgerMsg.data.taskLedger!.facts.given).toEqual(["既存の事実"]);
+    }
   });
 
   it("should handle client disconnection gracefully", async () => {

@@ -4,11 +4,57 @@
 
 import { createElement as h, useState, useMemo } from "react";
 
-/** ステータスのラベル・バッジクラス */
+function getLedgerBadgeClass(key, answer) {
+  if (key === "isRequestSatisfied") return answer ? "badge-success" : "badge-danger";
+  if (key === "isInLoop") return answer ? "badge-danger" : "badge-success";
+  if (key === "isProgressBeingMade") return answer ? "badge-success" : "badge-danger";
+  return "badge-neutral";
+}
+
+function renderFinalLedger(ledger) {
+  const progress = ledger.progressLedger;
+  if (!progress) return null;
+
+  return h("div", { className: "final-ledger-summary" },
+    h("div", { className: "final-ledger-header" },
+      h("span", { className: "final-ledger-title" }, "最終台帳状態"),
+      h("span", { className: "final-ledger-iteration" },
+        `反復 #${progress.iteration}`,
+      ),
+    ),
+    h("div", { className: "final-ledger-badges" },
+      h("span", {
+        className: `judgment-badge judgment-badge--small ${getLedgerBadgeClass("isRequestSatisfied", progress.isRequestSatisfied.answer)}`,
+        title: progress.isRequestSatisfied.reason,
+      }, progress.isRequestSatisfied.answer ? "充足" : "未充足"),
+      h("span", {
+        className: `judgment-badge judgment-badge--small ${getLedgerBadgeClass("isInLoop", progress.isInLoop.answer)}`,
+        title: progress.isInLoop.reason,
+      }, progress.isInLoop.answer ? "ループ" : "正常"),
+      h("span", {
+        className: `judgment-badge judgment-badge--small ${getLedgerBadgeClass("isProgressBeingMade", progress.isProgressBeingMade.answer)}`,
+        title: progress.isProgressBeingMade.reason,
+      }, progress.isProgressBeingMade.answer ? "進捗あり" : "停滞"),
+    ),
+    progress.nextAction && h("div", { className: "action-card action-card--compact" },
+      h("div", { className: "action-card-label" }, "最終アクション"),
+      h("div", { className: "action-card-answer" }, progress.nextAction.answer),
+    ),
+    progress.instruction && progress.instruction.answer && h("div", { className: "action-card action-card--compact" },
+      h("div", { className: "action-card-label" }, "最終サブAgent指示"),
+      h("div", { className: "action-card-answer" }, progress.instruction.answer),
+    ),
+  );
+}
+
+/** ステータスのラベル・バッジクラス（AgentResult.status + AgentState.status 両対応） */
 const STATUS_MAP = {
   success: { label: "\u2705 成功", cls: "success" },
+  completed: { label: "\u2705 成功", cls: "success" },
   failure: { label: "\u274C 失敗", cls: "failure" },
+  failed: { label: "\u274C 失敗", cls: "failure" },
   timeout: { label: "\u26A0 タイムアウト", cls: "timeout" },
+  timedOut: { label: "\u26A0 タイムアウト", cls: "timeout" },
   cancelled: { label: "\u23F9 キャンセル", cls: "cancelled" },
 };
 
@@ -19,6 +65,7 @@ export function HistoryTable({ agents, groups }) {
   const [filterGroup, setFilterGroup] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterRole, setFilterRole] = useState("all");
+  const [expandedId, setExpandedId] = useState(null);
 
   // 完了済み Agent のみフィルタ（result があるもの、または completed/failed/timedOut/resultReported）
   const completedAgents = useMemo(() => {
@@ -114,35 +161,59 @@ export function HistoryTable({ agents, groups }) {
         ),
       ),
       h("tbody", null,
-        filtered.map((agent) => {
+        filtered.flatMap((agent) => {
           const result = agent.result;
           const status = result ? result.status : agent.status;
           const statusInfo = STATUS_MAP[status] || { label: status, cls: "" };
-          const durationMs = result ? result.duration_ms : agent.elapsed_ms;
+          const durationMs = (result && result.duration_ms) || agent.elapsed_ms;
           const durationSec = durationMs ? (durationMs / 1000).toFixed(1) + "s" : "-";
           const timestamp = result ? result.timestamp : agent.startedAt;
           const summary = result ? result.summary : (agent.lastAssistantMessage || "-");
+          const responseText = result ? result.response : (agent.lastAssistantMessage || null);
+          const finalLedger = result ? result.finalLedger : null;
+          const hasExpandable = responseText || finalLedger;
           const groupDesc = groups[agent.groupId]
             ? groups[agent.groupId].description
             : agent.groupId;
+          const isExpanded = expandedId === agent.agentId;
 
-          return h("tr", { key: agent.agentId },
-            h("td", {
-              style: { fontFamily: "'SF Mono', Consolas, monospace", fontSize: "12px" },
-            }, agent.agentId),
-            h("td", null, groupDesc),
-            h("td", null, agent.role),
-            h("td", null,
-              h("span", { className: `status-badge ${statusInfo.cls}` }, statusInfo.label),
+          const rows = [
+            h("tr", {
+              key: agent.agentId,
+              className: `history-row ${isExpanded ? "expanded" : ""} ${hasExpandable ? "has-response" : ""}`,
+              onClick: () => hasExpandable && setExpandedId(isExpanded ? null : agent.agentId),
+              style: hasExpandable ? { cursor: "pointer" } : {},
+            },
+              h("td", {
+                style: { fontFamily: "'SF Mono', Consolas, monospace", fontSize: "12px" },
+              }, agent.agentId),
+              h("td", null, groupDesc),
+              h("td", null, agent.role),
+              h("td", null,
+                h("span", { className: `status-badge ${statusInfo.cls}` }, statusInfo.label),
+              ),
+              h("td", {
+                style: { maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+              }, summary),
+              h("td", null, durationSec),
+              h("td", { style: { fontSize: "12px", color: "var(--text-secondary)" } },
+                new Date(timestamp).toLocaleString("ja-JP"),
+              ),
             ),
-            h("td", {
-              style: { maxWidth: "200px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-            }, summary),
-            h("td", null, durationSec),
-            h("td", { style: { fontSize: "12px", color: "var(--text-secondary)" } },
-              new Date(timestamp).toLocaleString("ja-JP"),
-            ),
-          );
+          ];
+
+          if (isExpanded && hasExpandable) {
+            rows.push(
+              h("tr", { key: `${agent.agentId}-response`, className: "history-response-row" },
+                h("td", { colSpan: 7 },
+                  finalLedger && renderFinalLedger(finalLedger),
+                  responseText && h("div", { className: "history-response-content" }, responseText),
+                ),
+              ),
+            );
+          }
+
+          return rows;
         }),
       ),
     ),

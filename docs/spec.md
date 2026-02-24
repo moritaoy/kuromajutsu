@@ -77,7 +77,7 @@ docker compose up
 ### 1.4 動作原理
 
 1. Cursor のメイン Agent が MCP ツール `create_group` でグループを作成する
-2. メイン Agent が `run_agent` にグループ ID を指定して Agent を起動する
+2. メイン Agent が `run_agents`（または `run_sequential`）にグループ ID を指定して Agent を起動する
 3. MCPサーバーが Cursor CLI をヘッドレスモード（`agent -p --force`）で子プロセスとして起動する
 4. 子プロセスの出力を `--output-format stream-json --stream-partial-output` でリアルタイムにパースし、進捗を追跡する
 5. メイン Agent は `wait_agent` で完了を待機し、`report_result` で結果を収集する
@@ -96,7 +96,20 @@ docker compose up
 
 ### 2.2 提供ツール一覧
 
-MCPサーバーは以下の **8つのツール** を提供する。
+MCPサーバーは以下の **10個のツール** を提供する。
+
+| ツール名 | 説明 |
+|---|---|
+| `create_group` | グループを作成する |
+| `delete_group` | グループを削除する |
+| `run_agents` | 1台以上の Agent を一括起動する（Concurrent グループ用） |
+| `run_sequential` | ステージ制 Sequential 実行計画を投入する |
+| `run_magentic` | Magentic パターン（Orchestrator 自律管理）でタスクを実行する |
+| `list_agents` | 実行中の Agent 一覧を取得する |
+| `get_agent_status` | Agent の詳細状況を取得する |
+| `wait_agent` | Agent の完了を待機する |
+| `report_result` | Agent の実行結果を登録する |
+| `list_roles` | 利用可能な職種一覧を返す |
 
 #### 2.2.1 `create_group` — グループを作成する
 
@@ -107,6 +120,8 @@ MCPサーバーは以下の **8つのツール** を提供する。
 | パラメータ | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `description` | `string` | はい | グループの目的の簡潔な説明（例: 「認証機能の実装・テスト・レビュー」） |
+| `mode` | `string` | いいえ | 実行モード: `concurrent`（デフォルト）または `sequential` |
+| `parentGroupId` | `string` | いいえ | 親グループ ID（Magentic モードの子グループ作成時に指定） |
 
 **返却値:**
 
@@ -114,6 +129,7 @@ MCPサーバーは以下の **8つのツール** を提供する。
 {
   "groupId": "grp-1739487600-b4e1",
   "description": "認証機能の実装・テスト・レビュー",
+  "mode": "concurrent",
   "createdAt": "2026-02-13T12:00:00.000Z",
   "status": "active"
 }
@@ -121,8 +137,9 @@ MCPサーバーは以下の **8つのツール** を提供する。
 
 **内部動作:**
 1. ID を `grp-{unixTimestamp}-{random4hex}` 形式で発番する
-2. グループを管理テーブル（インメモリ Map）に登録する
-3. WebSocket 経由でダッシュボード UI に通知する
+2. `mode` を指定に従って設定する（未指定時は `concurrent`）
+3. グループを管理テーブル（インメモリ Map）に登録する
+4. WebSocket 経由でダッシュボード UI に通知する
 
 #### 2.2.2 `delete_group` — グループを削除する
 
@@ -146,50 +163,81 @@ MCPサーバーは以下の **8つのツール** を提供する。
 **内部動作:**
 1. グループの存在を検証する
 2. グループに所属する実行中の Agent がないことを確認する（実行中の Agent がある場合はエラー）
-3. グループを管理テーブルから削除する
-4. WebSocket 経由でダッシュボード UI に通知する
+3. グループのステータスを `"deleted"` に変更する
+4. 完了済み Agent は履歴として保持する（削除しない）
+5. 削除済みグループの Agent が全体で最大 20 件を超えた場合、古い Agent から自動的に削除する（Agent がなくなったグループは管理テーブルから除去する）
+6. WebSocket 経由でダッシュボード UI に通知する
 
-#### 2.2.3 `run_agent` — Agent を実行する
+#### 2.2.3 `run_agents` — Agent を一括起動する
 
-指定した職種とプロンプトで新しい Agent を起動し、一意の ID を発番して返す。Agent は必ずグループに所属させる。
+指定した職種とプロンプトで 1 台以上の Agent を一括起動する（Concurrent グループ用）。各 Agent は必ずグループに所属させる。
 
 **入力パラメータ:**
 
 | パラメータ | 型 | 必須 | 説明 |
 |---|---|---|---|
-| `groupId` | `string` | はい | 所属するグループ ID（`create_group` で事前に作成） |
-| `role` | `string` | はい | 職種 ID（例: `impl-code`） |
-| `prompt` | `string` | はい | Agent に渡すユーザープロンプト |
-| `workingDirectory` | `string` | いいえ | 作業ディレクトリ（デフォルト: カレントディレクトリ） |
-| `timeout_ms` | `number` | いいえ | タイムアウト（ミリ秒）。デフォルトは設定ファイルの値 |
+| `groupId` | `string` | はい | 所属するグループ ID |
+| `agents` | `array` | はい | 起動する Agent の定義配列。各要素: `{ role: string, prompt: string, workingDirectory?: string, timeout_ms?: number }` |
 
-**モデルの決定:** `run_agent` はモデルパラメータを受け付けない。使用するモデルは職種（Role）の設定に従う。
+**モデルの決定:** `run_agents` はモデルパラメータを受け付けない。使用するモデルは職種（Role）の設定に従う。
 
 **返却値:**
 
 ```json
 {
-  "agentId": "impl-code-1739487600-a3f2",
-  "groupId": "grp-1739487600-b4e1",
-  "role": "impl-code",
-  "model": "claude-4-sonnet",
-  "status": "queued"
+  "agents": [
+    {
+      "agentId": "impl-code-1739487600-a3f2",
+      "groupId": "grp-1739487600-b4e1",
+      "role": "impl-code",
+      "model": "claude-4-sonnet",
+      "status": "queued"
+    }
+  ],
+  "total": 1
 }
 ```
 
+**エラーコード:** `GROUP_NOT_FOUND`, `GROUP_NOT_ACTIVE`, `MODE_MISMATCH`, `ROLE_NOT_FOUND`, `ROLE_UNAVAILABLE`, `MAX_CONCURRENT_REACHED`, `AGENTS_START_FAILED`, `EMPTY_AGENTS`
+
 **内部動作:**
-1. 指定された `groupId` が存在し、アクティブであることを検証する
-2. 指定された `role` が存在し、利用可能（ヘルスチェック通過済み）か検証する
-3. ID を `{role}-{timestamp}-{random4}` 形式で発番する
+1. 指定された `groupId` が存在し、アクティブかつ `mode: "concurrent"` であることを検証する
+2. 各 Agent の `role` が存在し、利用可能（ヘルスチェック通過済み）か検証する
+3. 各 Agent に ID を `{role}-{timestamp}-{random4}` 形式で発番する
 4. Agent をグループに紐付けて管理テーブルに登録する
-5. Cursor CLI を以下のコマンドで起動する:
-   ```bash
-   agent -p --force -m {role.model} --output-format stream-json --stream-partial-output "{role.systemPrompt}\n\n{prompt}"
-   ```
+5. Cursor CLI を各 Agent ごとに起動する
 6. 子プロセスの stream-json 出力をリアルタイムでパースし、内部状態を更新する
 7. WebSocket 経由でダッシュボード UI に通知する
 
-#### 2.2.4 `list_agents` — 実行中の Agent 一覧を取得する
+#### 2.2.4 `run_sequential` — Sequential 実行計画を投入する
+
+ステージ制の Sequential 実行計画を投入する。各ステージ内は並列実行、ステージ間は直列に実行される。
+
+**入力パラメータ:**
+
+| パラメータ | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `groupId` | `string` | はい | 所属するグループ ID（`mode: "sequential"` で作成済み） |
+| `stages` | `array` | はい | 実行ステージの配列。各要素: `{ tasks: [{ role, prompt, workingDirectory?, timeout_ms? }] }` |
+
+**返却値:**
+
+```json
+{
+  "groupId": "grp-1739487600-b4e1",
+  "totalStages": 3,
+  "currentStageIndex": 0,
+  "stages": [...],
+  "agents": [...],
+  "total": 1
+}
+```
+
+**前ステージ結果の自動注入:** Stage N（N > 0）の Agent 起動時、直前ステージの全 Agent の `summary` + `response` をプロンプトに自動注入する。
+
+**エラーコード:** `GROUP_NOT_FOUND`, `GROUP_NOT_ACTIVE`, `MODE_MISMATCH`, `ROLE_NOT_FOUND`, `ROLE_UNAVAILABLE`, `MAX_CONCURRENT_REACHED`, `EMPTY_STAGES`, `EMPTY_STAGE_TASKS`, `SEQUENTIAL_START_FAILED`
+
+#### 2.2.5 `list_agents` — 実行中の Agent 一覧を取得する
 
 現在管理しているすべての Agent（実行中・完了済み含む）の一覧を返す。グループ ID を指定して、特定グループに所属する Agent のみをフィルタリングできる。
 
@@ -220,7 +268,7 @@ MCPサーバーは以下の **8つのツール** を提供する。
 }
 ```
 
-#### 2.2.5 `get_agent_status` — Agent の詳細状況を取得する
+#### 2.2.6 `get_agent_status` — Agent の詳細状況を取得する
 
 指定した ID の Agent のリアルタイム詳細情報を返す。
 
@@ -242,20 +290,13 @@ MCPサーバーは以下の **8つのツール** を提供する。
   "startedAt": "2026-02-13T12:00:00.000Z",
   "elapsed_ms": 15000,
   "toolCallCount": 5,
-  "lastAssistantMessage": "ファイルを読み込んで実装を開始します...",
-  "recentToolCalls": [
-    {
-      "callId": "toolu_vrtx_01abc",
-      "type": "readToolCall",
-      "subtype": "completed",
-      "args": { "path": "src/index.ts" }
-    }
-  ],
   "result": null
 }
 ```
 
-#### 2.2.6 `wait_agent` — Agent の完了を待機する
+> **設計意図:** メイン Agent のコンテキストを圧迫しないよう、`recentToolCalls`・`lastAssistantMessage`・`editedFiles`・`createdFiles` は返却しない。これらはダッシュボード UI（WebSocket 経由）で別途確認可能。完了済み Agent の場合は `result` フィールドに `summary`・`response`・`editedFiles`・`createdFiles` 等が含まれる。
+
+#### 2.2.7 `wait_agent` — Agent の完了を待機する
 
 指定した Agent（複数可）が完了するまでブロックする。
 
@@ -283,7 +324,7 @@ MCPサーバーは以下の **8つのツール** を提供する。
 }
 ```
 
-#### 2.2.7 `report_result` — Agent の実行結果を登録する
+#### 2.2.8 `report_result` — Agent の実行結果を登録する
 
 Agent の実行完了後に、結果データを登録する。このツールは Agent 自身がプロンプト内の指示に従い MCP 経由で呼び出す想定。成功・失敗いずれの場合でも登録できる。
 
@@ -293,7 +334,8 @@ Agent の実行完了後に、結果データを登録する。このツール�
 |---|---|---|---|
 | `agentId` | `string` | はい | Agent ID |
 | `status` | `string` | はい | `success`, `failure`, `timeout`, `cancelled` のいずれか |
-| `summary` | `string` | はい | 端的なテキストサマリ |
+| `summary` | `string` | はい | 実行結果の要約（1-2文で簡潔に） |
+| `response` | `string` | はい | 実行結果の構造化レポート（実施内容・成果・判断理由・注意点・申し送り事項を整理して記載） |
 | `editedFiles` | `string[]` | いいえ | 編集したファイルパス一覧 |
 | `createdFiles` | `string[]` | いいえ | 新規作成したファイルパス一覧 |
 | `errorMessage` | `string` | いいえ | 失敗時のエラーメッセージ |
@@ -318,9 +360,9 @@ Agent の実行完了後に、結果データを登録する。このツール�
 }
 ```
 
-#### 2.2.8 `list_roles` — 利用可能な職種一覧を返す
+#### 2.2.9 `list_roles` — 利用可能な職種一覧を返す
 
-設定されている全職種の一覧と、それぞれの利用可否ステータスを返す。
+設定されている全職種の一覧を返す。
 
 **入力パラメータ:** なし
 
@@ -332,37 +374,52 @@ Agent の実行完了後に、結果データを登録する。このツール�
     {
       "id": "impl-code",
       "name": "コード実装者",
-      "model": "claude-4-sonnet",
-      "available": true,
-      "healthCheck": {
-        "status": "passed",
-        "checkedAt": "2026-02-13T12:00:00.000Z",
-        "responseTime_ms": 1200
-      },
-      "modelValidation": {
-        "status": "valid",
-        "checkedAt": "2026-02-13T12:00:00.000Z"
-      }
+      "description": "コードの実装・修正を行う。新機能の追加、バグ修正、リファクタリングなど、ファイルの編集を伴うタスクに使用する",
+      "model": "claude-4-sonnet"
     },
     {
       "id": "code-review",
       "name": "コードレビュワー",
-      "model": "invalid-model-name",
-      "available": false,
-      "healthCheck": {
-        "status": "skipped",
-        "reason": "モデル検証に失敗したためスキップ"
-      },
-      "modelValidation": {
-        "status": "invalid",
-        "message": "モデル 'invalid-model-name' は利用できません",
-        "availableModels": ["claude-4-sonnet", "claude-4-opus", "gpt-4o"]
-      }
+      "description": "コードの品質をレビューする。実装完了後の品質チェック、セキュリティ・パフォーマンス観点のフィードバックに使用する。ファイルの編集は行わない",
+      "model": "claude-4-sonnet"
     }
-  ],
-  "availableModels": ["claude-4-sonnet", "claude-4-opus", "gpt-4o"]
+  ]
 }
 ```
+
+#### 2.2.10 `run_magentic` — Magentic パターンでタスクを実行する
+
+Magentic パターン（Orchestrator Agent による自律管理）でタスクを実行する。Orchestrator Agent が計画→委任→評価→リプランのループを自律的に繰り返し、タスクを完了するまで実行する。
+
+**入力パラメータ:**
+
+| パラメータ | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `description` | `string` | はい | グループの説明 |
+| `task` | `string` | はい | 達成すべきタスクの詳細な説明 |
+| `completionCriteria` | `string` | はい | 完了条件（どうなったらタスク完了とみなすか） |
+| `scope` | `string` | はい | 操作範囲（変更してよいファイル・ディレクトリの範囲） |
+| `constraints` | `string` | いいえ | 追加制約（守るべきルールや禁止事項） |
+| `context` | `string` | いいえ | 補足コンテキスト（背景情報、関連仕様書パス等） |
+| `availableRoles` | `string[]` | いいえ | 使用可能な職種（デフォルト: orchestrator 以外の全職種） |
+| `maxIterations` | `number` | いいえ | 最大反復回数（デフォルト: 10） |
+| `timeout_ms` | `number` | いいえ | 全体タイムアウト（ミリ秒） |
+
+**返却値:**
+
+```json
+{
+  "groupId": "grp-1739487600-b4e1",
+  "orchestratorAgentId": "orchestrator-1739487600-a3f2",
+  "status": "started"
+}
+```
+
+**内部動作:**
+1. `mode: "magentic"` でグループを作成する
+2. `orchestrator` ロール（opus-4.6-thinking）で Orchestrator Agent を起動する
+3. Orchestrator のプロンプトに task, completionCriteria, scope, constraints, context, availableRoles, maxIterations を注入する
+4. Orchestrator が自律的に計画→委任→評価→リプランのループを実行する（サブ Agent は `create_group` + `run_agents` で起動）
 
 ---
 
@@ -380,19 +437,31 @@ Agent の実行完了後に、結果データを登録する。このツール�
 ### 3.2 グループのデータ構造
 
 ```typescript
+type GroupMode = "concurrent" | "sequential";
+
 interface GroupDefinition {
   /** 一意識別子（`grp-{unixTimestamp}-{random4hex}` 形式） */
   id: string;
   /** グループの目的の簡潔な説明 */
   description: string;
+  /** 実行モード: concurrent（並列）または sequential（ステージ制直列） */
+  mode: GroupMode;
   /** グループのステータス */
   status: "active" | "deleted";
   /** 作成日時（ISO 8601） */
   createdAt: string;
   /** 所属する Agent ID の一覧 */
   agentIds: string[];
+  /** 親グループ ID（Magentic モードの子グループで設定） */
+  parentGroupId?: string;
+  /** Orchestrator Agent ID（Magentic モードの親グループで設定） */
+  orchestratorAgentId?: string;
 }
 ```
+
+**mode の説明:**
+- `concurrent`: 並列実行モード。`run_agents` で 1 台以上の Agent を同時に起動する
+- `sequential`: ステージ制実行モード。`run_sequential` でステージ配列を投入し、各ステージ内は並列、ステージ間は直列に実行する
 
 ### 3.3 ID 発番ルール
 
@@ -404,7 +473,7 @@ interface GroupDefinition {
 
 - グループはインメモリの Map で管理する（Agent 管理テーブルと同様）
 - `create_group` で作成、`delete_group` で削除する
-- Agent 実行時（`run_agent`）に `groupId` を指定して紐付ける
+- Agent 実行時（`run_agents` または `run_sequential`）に `groupId` を指定して紐付ける
 - グループに所属する実行中の Agent がある場合、そのグループは削除できない
 - ダッシュボード UI からグループ一覧を確認できる
 
@@ -420,6 +489,8 @@ interface RoleDefinition {
   id: string;
   /** 表示名 */
   name: string;
+  /** 職種の概要と使いどころの説明（list_roles で返却される） */
+  description: string;
   /** Agent に渡すシステムプロンプト */
   systemPrompt: string;
   /** 使用する LLM モデル名（Cursor CLI の -m オプションに渡す値） */
@@ -439,6 +510,7 @@ interface RoleDefinition {
 |---|---|
 | id | `impl-code` |
 | name | コード実装者 |
+| description | コードの実装・修正を行う。新機能の追加、バグ修正、リファクタリングなど、ファイルの編集を伴うタスクに使用する |
 | model | `claude-4-sonnet`（デフォルト） |
 | systemPrompt | あなたはコード実装の専門家です。与えられた仕様や指示に基づき、高品質なコードを実装してください。実装が完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。 |
 | healthCheckPrompt | `Hello, respond with exactly: OK` |
@@ -449,6 +521,7 @@ interface RoleDefinition {
 |---|---|
 | id | `code-review` |
 | name | コードレビュワー |
+| description | コードの品質をレビューする。実装完了後の品質チェック、セキュリティ・パフォーマンス観点のフィードバックに使用する。ファイルの編集は行わない |
 | model | `claude-4-sonnet`（デフォルト） |
 | systemPrompt | あなたはコードレビューの専門家です。与えられたコードを精査し、品質・可読性・セキュリティ・パフォーマンスの観点からフィードバックを提供してください。レビューが完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。 |
 | healthCheckPrompt | `Hello, respond with exactly: OK` |
@@ -459,9 +532,26 @@ interface RoleDefinition {
 |---|---|
 | id | `text-review` |
 | name | 文章レビュワー |
+| description | 文章の品質をレビューする。ドキュメント・仕様書・READMEなどの文法・表現・構成チェックに使用する。ファイルの編集は行わない |
 | model | `claude-4-sonnet`（デフォルト） |
 | systemPrompt | あなたは文章レビューの専門家です。与えられたテキストの文法、表現、構成、一貫性を確認し、改善提案を提供してください。レビューが完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。 |
 | healthCheckPrompt | `Hello, respond with exactly: OK` |
+
+#### `research` — 調査員
+
+| プロパティ | 値 |
+|---|---|
+| id | `research` |
+| name | 調査員 |
+| description | 調査・情報収集を行う。技術選定、ベストプラクティスの調査、コードベースの分析などに使用する。ファイルの編集は行わない |
+| model | `composer-1.5`（デフォルト） |
+| systemPrompt | あなたは調査・情報収集の専門家です。与えられたテーマやトピックについて、Web検索やローカルファイルの検索を駆使して情報を収集し、整理された調査レポートとして報告してください。調査が完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。 |
+| healthCheckPrompt | `Hello, respond with exactly: OK` |
+
+**特記事項:**
+- ファイルの編集は行わず、調査結果をテキストで報告するのみ
+- Web検索（WebSearch）、ファイル検索（Grep, Glob, SemanticSearch）、ファイル読み込み（Read）を活用
+- 調査結果は「調査概要・調査結果・参考情報・所見」の構造で整理して報告する
 
 #### `impl-test` — テスト実装者
 
@@ -469,8 +559,20 @@ interface RoleDefinition {
 |---|---|
 | id | `impl-test` |
 | name | テスト実装者 |
+| description | テストコードの実装を行う。ユニットテスト・統合テストの作成、テストカバレッジの向上に使用する |
 | model | `claude-4-sonnet`（デフォルト） |
 | systemPrompt | あなたはテスト実装の専門家です。与えられた仕様やコードに対して、包括的なテストを作成してください。ユニットテスト、エッジケース、異常系のテストを含めてください。実装が完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。 |
+| healthCheckPrompt | `Hello, respond with exactly: OK` |
+
+#### `orchestrator` — オーケストレーター
+
+| プロパティ | 値 |
+|---|---|
+| id | `orchestrator` |
+| name | オーケストレーター |
+| description | Magentic パターンのオーケストレーションを担当する。タスクの分析・計画立案・サブ Agent への委任・結果評価・リプランニングを自律的に行う |
+| model | `opus-4.6-thinking` |
+| systemPrompt | （Magentic 専用のシステムプロンプト。計画→委任→評価→リプランのループを指示） |
 | healthCheckPrompt | `Hello, respond with exactly: OK` |
 
 ### 4.3 職種の管理
@@ -507,14 +609,13 @@ interface RoleToolDefinition {
 
 #### 4.4.3 プロンプトへの注入
 
-Agent 起動時、`buildFullPrompt()` が以下の3層構造から4層構造に拡張される:
+Agent 起動時、`buildFullPrompt()` が以下の5層構造で構築される（5.3.1 参照）:
 
 1. ロールのシステムプロンプト（設定ファイル由来）
 2. kuromajutsu メタデータブロック（agentId, groupId, report_result 指示）
-3. **ツールブロック**（ロールに紐付くツールの使用方法）← 新規追加
-4. ユーザープロンプト
-
-ツールが設定されていないロールでは、ツールブロックは省略される（従来の3層構造と同等）。
+3. **ツールブロック**（ロールに紐付くツールの使用方法。ツール未設定時は省略）
+4. **前ステージ結果ブロック**（Sequential モードの Stage N>0 の場合のみ。直前ステージの summary + response）
+5. ユーザープロンプト
 
 #### 4.4.4 設定例
 
@@ -538,7 +639,7 @@ roles:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued: run_agent 呼び出し
+    [*] --> Queued: run_agents / run_sequential 呼び出し
     Queued --> Running: 子プロセス起動成功
     Queued --> Failed: 子プロセス起動失敗
     Running --> Completed: exit code 0 かつ result イベント受信
@@ -574,7 +675,7 @@ agent -p --force \
 
 #### 5.3.1 プロンプト構築
 
-Agent に渡すプロンプト（`fullPrompt`）は以下の3層構造で動的に構築する:
+Agent に渡すプロンプト（`fullPrompt`）は以下の5層構造で動的に構築する:
 
 ```
 {role.systemPrompt}
@@ -594,13 +695,27 @@ Agent に渡すプロンプト（`fullPrompt`）は以下の3層構造で動的�
 
   agentId: "{agentId}"
   status: "success" または "failure"
-  summary: "実行結果の要約（何を実施し、どうなったか）"
+  summary: "実行結果の要約（1-2文で簡潔に）"
+  response: "実行結果の詳細レポート（下記ガイドライン参照）"
   editedFiles: ["編集したファイルパスの配列"]  // 省略可
   createdFiles: ["新規作成したファイルパスの配列"]  // 省略可
   errorMessage: "エラーメッセージ"  // 失敗時のみ
 
+**response のガイドライン:**
+response は生の実行ログではなく、実行結果を適切にまとめた構造化レポートです。
+メイン Agent や人間が読んで内容を正確に把握できるよう、以下を整理して記載してください:
+- 何を実施したか（実施内容）
+- 結果どうなったか（成果・変更点）
+- 判断や選択の理由（なぜそうしたか）
+- 注意点・懸念事項（あれば）
+- 次のステップへの申し送り事項（あれば）
+
 report_result を呼ばないとメイン Agent が結果を受け取れません。タスクの成否に関わらず必ず呼び出してください。
 ---
+
+{toolBlock}  ← ロールに紐付くツールがある場合のみ
+
+{previousStageResultsBlock}  ← Sequential モードかつ Stage N (N>0) の場合のみ。直前ステージの全 Agent の summary + response
 
 {userPrompt}
 ```
@@ -611,13 +726,16 @@ report_result を呼ばないとメイン Agent が結果を受け取れませ�
 |---|---|---|
 | 第1層: ロールプロンプト | 職種固有の指示（専門家としての振る舞い等） | `kuromajutsu.config.yaml` の `systemPrompt` |
 | 第2層: メタデータブロック | Agent ID、Group ID、`report_result` の呼び出し指示 | `AgentManager.buildFullPrompt()` で動的生成 |
-| 第3層: ユーザープロンプト | メイン Agent が `run_agent` で指定した具体的タスク内容 | `run_agent` ツールの `prompt` パラメータ |
+| 第3層: ツールブロック | ロールに紐付くツールの使用方法 | `kuromajutsu.config.yaml` の `roles[].tools`（ツール未設定の場合は省略） |
+| 第4層: 前ステージ結果ブロック | 直前ステージの全 Agent の summary + response | Sequential モードの Stage N（N>0）で自動注入 |
+| 第5層: ユーザープロンプト | メイン Agent が `run_agents` / `run_sequential` で指定した具体的タスク内容 | ツールの `prompt` パラメータ |
 
 **設計意図:**
 
 - サブ Agent は自身の `agentId` を知る必要がある（`report_result` の必須パラメータ）
 - メイン Agent が `report_result` を代理呼び出しすることは想定しない。サブ Agent 自身が MCP 経由で呼び出す
 - 第2層のメタデータブロックにより、設定ファイルの `systemPrompt` を変更せずに動的な情報を注入できる
+- Sequential モードでは前ステージの結果を次ステージの Agent に自動引き継ぎ、パイプライン処理を可能にする
 
 ### 5.4 stream-json パース
 
@@ -634,7 +752,7 @@ Cursor CLI が出力する NDJSON の各イベントタイプをパースして 
 
 ### 5.5 タイムアウト処理
 
-- `run_agent` 呼び出し時に `timeout_ms` を指定可能
+- `run_agents` / `run_sequential` 呼び出し時に `timeout_ms` を指定可能
 - 指定なしの場合はタイムアウトなし（無制限）
 - 設定ファイルの `defaultTimeout_ms` でデフォルト値を設定することも可能（オプション）
 - タイムアウト到達時に子プロセスを SIGTERM で終了し、ステータスを `TimedOut` に更新
@@ -653,8 +771,10 @@ interface AgentResult {
   groupId: string;
   /** 実行ステータス */
   status: "success" | "failure" | "timeout" | "cancelled";
-  /** 端的なテキストサマリ */
+  /** 実行結果の要約（1-2文） */
   summary: string;
+  /** 実行結果を整理した構造化レポート */
+  response: string;
   /** 編集したファイルパス一覧 */
   editedFiles: string[];
   /** 新規作成したファイルパス一覧 */
@@ -680,7 +800,7 @@ interface AgentResult {
 
 1. **自動収集（stream-json パース由来）:** Agent の子プロセスが出力する stream-json から、`tool_call` イベント（writeToolCall）を解析し、`editedFiles` / `createdFiles` を自動的に収集する。`result` イベントから `duration_ms` を取得する。
 
-2. **Agent 自身による報告（`report_result` ツール）:** プロンプト構築時にメタデータブロック（5.3.1 参照）で `agentId` と `report_result` の呼び出し方法を注入する。サブ Agent はこの情報をもとに MCP ツール `report_result` を呼び出し、`summary` や `status` などの情報を登録する。
+2. **Agent 自身による報告（`report_result` ツール）:** プロンプト構築時にメタデータブロック（5.3.1 参照）で `agentId` と `report_result` の呼び出し方法を注入する。サブ Agent はこの情報をもとに MCP ツール `report_result` を呼び出し、`summary`・`response`・`status` などの情報を登録する。`response` は実行結果を適切にまとめた構造化レポートであり、生の実行ログではない。
 
 3. **結合:** サーバー側は自動収集したデータと Agent の自己報告データをマージして最終的な `AgentResult` を構築する。
 
@@ -731,7 +851,7 @@ sequenceDiagram
 3. 利用不可のモデルが設定されている場合:
    - コンソールに警告ログを出力する
    - ダッシュボード UI に該当職種のエラーを表示する（赤色バッジ + 利用可能モデルへの変更を促す UI）
-   - 該当職種での Agent 実行をブロックする（`run_agent` でエラーを返す）
+   - 該当職種での Agent 実行をブロックする（`run_agents` / `run_sequential` でエラーを返す）
 
 ### 7.3 ヘルスチェック
 
@@ -900,7 +1020,8 @@ interface HealthCheckResult {
 | `healthcheck:complete` | ヘルスチェック全体完了 | 全チェック完了時 |
 | `group:created` | グループ作成通知 | `create_group` 呼び出し時 |
 | `group:deleted` | グループ削除通知 | `delete_group` 呼び出し時 |
-| `agent:created` | Agent 作成通知 | `run_agent` 呼び出し時 |
+| `group:stage_advanced` | Sequential ステージ進行通知 | Sequential グループのステージが次に進んだ時 |
+| `agent:created` | Agent 作成通知 | `run_agents` / `run_sequential` 呼び出し時 |
 | `agent:status_update` | Agent 状態更新 | stream-json イベント受信時 |
 | `agent:completed` | Agent 完了通知 | Agent プロセス終了時 |
 | `agent:result_reported` | 結果登録通知 | `report_result` 呼び出し時 |
@@ -943,6 +1064,7 @@ log:
 roles:
   - id: impl-code
     name: コード実装者
+    description: コードの実装・修正を行う。新機能の追加、バグ修正、リファクタリングなど、ファイルの編集を伴うタスクに使用する
     model: claude-4-sonnet
     systemPrompt: |
       あなたはコード実装の専門家です。
@@ -953,6 +1075,7 @@ roles:
 
   - id: code-review
     name: コードレビュワー
+    description: コードの品質をレビューする。実装完了後の品質チェック、セキュリティ・パフォーマンス観点のフィードバックに使用する。ファイルの編集は行わない
     model: claude-4-sonnet
     systemPrompt: |
       あなたはコードレビューの専門家です。
@@ -963,6 +1086,7 @@ roles:
 
   - id: text-review
     name: 文章レビュワー
+    description: 文章の品質をレビューする。ドキュメント・仕様書・READMEなどの文法・表現・構成チェックに使用する。ファイルの編集は行わない
     model: claude-4-sonnet
     systemPrompt: |
       あなたは文章レビューの専門家です。
@@ -971,8 +1095,21 @@ roles:
     healthCheckPrompt: "Hello, respond with exactly: OK"
     tools: []
 
+  - id: research
+    name: 調査員
+    description: 調査・情報収集を行う。技術選定、ベストプラクティスの調査、コードベースの分析などに使用する。ファイルの編集は行わない
+    model: composer-1.5
+    systemPrompt: |
+      あなたは調査・情報収集の専門家です。
+      与えられたテーマやトピックについて、Web検索やローカルファイルの検索を駆使して
+      情報を収集し、整理された調査レポートとして報告してください。
+      調査が完了したら、必ず kuromajutsu MCP の `report_result` ツールを呼び出して結果を報告してください。
+    healthCheckPrompt: "Hello, respond with exactly: OK"
+    tools: []
+
   - id: impl-test
     name: テスト実装者
+    description: テストコードの実装を行う。ユニットテスト・統合テストの作成、テストカバレッジの向上に使用する
     model: claude-4-sonnet
     systemPrompt: |
       あなたはテスト実装の専門家です。
@@ -1024,25 +1161,86 @@ roles:
 
 ## 11. 利用フロー例
 
-### 11.1 メイン Agent からの並列実行
+### 11.1 メイン Agent からの並列実行（Concurrent モード）
 
 ```
 ユーザー → メインAgent: 「この機能を実装して、テストも書いて、レビューもして」
 
 メインAgent:
   1. list_roles で利用可能な職種を確認
-  2. create_group(description: "〇〇機能の実装・テスト・レビュー") → groupId
-  3. run_agent(groupId, role: "impl-code", prompt: "〇〇機能を実装して") → agentId_1
-  4. run_agent(groupId, role: "impl-test", prompt: "〇〇機能のテストを書いて") → agentId_2
-  5. wait_agent(agentIds: [agentId_1, agentId_2], mode: "all")
-  6. get_agent_status(agentId_1) で実装結果を確認
-  7. run_agent(groupId, role: "code-review", prompt: "agentId_1 の実装をレビューして") → agentId_3
-  8. wait_agent(agentIds: [agentId_3])
-  9. 結果を統合してユーザーに報告
-  10. delete_group(groupId) でグループを削除
+  2. create_group(description: "〇〇機能の実装・テスト・レビュー", mode: "concurrent") → groupId
+  3. run_agents(groupId, agents: [
+       { role: "impl-code", prompt: "〇〇機能を実装して" },
+       { role: "impl-test", prompt: "〇〇機能のテストを書いて" }
+     ]) → { agents: [{ agentId: agentId_1 }, { agentId: agentId_2 }], total: 2 }
+  4. wait_agent(agentIds: [agentId_1, agentId_2], mode: "all")
+  5. get_agent_status(agentId_1) で実装結果を確認
+  6. run_agents(groupId, agents: [
+       { role: "code-review", prompt: "agentId_1 の実装をレビューして" }
+     ]) → { agents: [{ agentId: agentId_3 }], total: 1 }
+  7. wait_agent(agentIds: [agentId_3])
+  8. 結果を統合してユーザーに報告
+  9. delete_group(groupId) でグループを削除
 ```
 
-### 11.2 ダッシュボードでの監視
+### 11.2 Sequential モード（パイプライン実行）
+
+調査 → 実装（並列 3 台）→ テストのパイプライン例:
+
+```
+ユーザー → メインAgent: 「〇〇機能の調査から実装・テストまで一気にやって」
+
+メインAgent:
+  1. list_roles で利用可能な職種を確認
+  2. create_group(description: "〇〇機能のパイプライン実行", mode: "sequential") → groupId
+  3. run_sequential(groupId, stages: [
+       { tasks: [{ role: "research", prompt: "〇〇機能に必要な技術・既存実装を調査して" }] },
+       { tasks: [
+           { role: "impl-code", prompt: "調査結果を元に〇〇機能の A 部分を実装して" },
+           { role: "impl-code", prompt: "調査結果を元に〇〇機能の B 部分を実装して" },
+           { role: "impl-code", prompt: "調査結果を元に〇〇機能の C 部分を実装して" }
+         ] },
+       { tasks: [{ role: "impl-test", prompt: "前ステージの実装結果を踏まえてテストを書いて" }] }
+     ]) → { groupId, totalStages: 3, agents: [...] }
+  4. wait_agent(agentIds: [...]) で全 Agent の完了を待機
+  5. 結果を統合してユーザーに報告
+  6. delete_group(groupId) でグループを削除
+```
+
+**Sequential のポイント:**
+- Stage 1 の調査結果は Stage 2 の各実装 Agent のプロンプトに自動注入される
+- Stage 2 の実装結果は Stage 3 のテスト Agent のプロンプトに自動注入される
+- 各ステージ内は並列実行、ステージ間は直列
+
+### 11.3 Magentic モード（Orchestrator 自律実行）
+
+複雑なタスクを Orchestrator Agent に委任し、自律的に計画→委任→評価→リプランを繰り返して完了させる例:
+
+```
+ユーザー → メインAgent: 「認証機能を実装して。テストが通るまでやって」
+
+メインAgent:
+  1. list_roles で利用可能な職種を確認
+  2. run_magentic(
+       description: "認証機能の実装",
+       task: "認証機能を実装する。ログイン、ログアウト、セッション管理を含む",
+       completionCriteria: "全テストが通り、code-review で問題なしと判定されること",
+       scope: "src/auth/ 配下のみ。既存の src/user/ は参照のみ",
+       constraints: "既存の API インターフェースを変更しないこと",
+       context: "認証仕様は docs/auth-spec.md を参照"
+     ) → { groupId, orchestratorAgentId, status: "started" }
+  3. wait_agent(agentIds: [orchestratorAgentId])
+  4. get_agent_status(orchestratorAgentId) で最終結果を確認
+  5. delete_group(groupId)
+```
+
+**Magentic のポイント:**
+- メイン Agent はタスク・完了条件・範囲を指定するだけで、実行計画は Orchestrator に任せる
+- Orchestrator が create_group → run_agents → wait_agent を自律的に繰り返す
+- 失敗時は Orchestrator がリプランして再委任する
+- maxIterations または timeout_ms で全体の制限が可能
+
+### 11.4 ダッシュボードでの監視
 
 1. ブラウザで `http://localhost:9696` を開く
 2. 起動時のヘルスチェック状況がリアルタイムで表示される
@@ -1056,7 +1254,7 @@ roles:
 ## 12. 将来の拡張ポイント
 
 - **カスタム職種の UI 定義:** ダッシュボード UI から新しい職種を作成・編集・削除できるようにする
-- **Agent 間依存関係（DAG 実行）:** Agent の実行順序に依存関係を定義し、DAG として管理する
+- **Magentic パターンの改善:** プロンプトチューニング、評価精度向上、Ledger フォーマットの最適化等
 - **実行結果の永続化:** SQLite 等でセッション間をまたいで実行履歴を保持する
 - **Agent のキャンセル機能:** 実行中の Agent を MCP ツール経由で中断する `cancel_agent` ツールの追加
 - **ツール機能の拡張:** 現在はビルトインの textlint ツールのみ対応。カスタムツール定義や設定ファイルからのツール登録に対応する
@@ -1073,10 +1271,10 @@ roles:
 |------|---------|------|
 | エージェント | Agent | Cursor CLI ヘッドレスモードで起動される独立した AI 実行単位。子プロセスとして動作する |
 | メインエージェント | Main Agent | Cursor IDE 上でユーザーと直接対話する Agent。kuromajutsu の MCP ツールを呼び出して複数のサブ Agent を管理する |
-| サブエージェント | Sub Agent | メインエージェントから `run_agent` で起動される Agent。特定の職種に基づいて動作する |
+| サブエージェント | Sub Agent | メインエージェントから `run_agents` または `run_sequential` で起動される Agent。特定の職種に基づいて動作する |
 | 職種 / ロール | Role | Agent に割り当てる役割の定義。システムプロンプト、モデル、ツールセット等で構成される |
 | MCPサーバー | MCP Server | Model Context Protocol に準拠したサーバー。Cursor と stdio で通信し、ツールを提供する |
-| MCPツール | MCP Tool | MCPサーバーが公開する操作。`run_agent` 等の6つのツールを指す |
+| MCPツール | MCP Tool | MCPサーバーが公開する操作。`run_agents` 等の10個のツールを指す |
 | ダッシュボード | Dashboard | ブラウザで表示する管理 UI。Agent の状態をリアルタイムで監視する |
 | ヘッドレスモード | Headless Mode | Cursor CLI の非対話モード（`agent -p --force`）。GUI なしで Agent を実行する |
 | stream-json | Stream JSON | Cursor CLI の `--output-format stream-json` で出力される NDJSON 形式のイベントストリーム |

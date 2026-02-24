@@ -20,6 +20,7 @@ function createTestConfig(overrides?: Partial<AppConfig>): AppConfig {
       {
         id: "impl-code",
         name: "コード実装者",
+        description: "コードの実装・修正を行う",
         model: "claude-4-sonnet",
         systemPrompt: "あなたはコード実装の専門家です。",
         healthCheckPrompt: "Hello, respond with exactly: OK",
@@ -28,6 +29,7 @@ function createTestConfig(overrides?: Partial<AppConfig>): AppConfig {
       {
         id: "code-review",
         name: "コードレビュワー",
+        description: "コードの品質をレビューする",
         model: "claude-4-sonnet",
         systemPrompt: "あなたはコードレビューの専門家です。",
         healthCheckPrompt: "Hello, respond with exactly: OK",
@@ -665,6 +667,7 @@ describe("HealthChecker", () => {
           {
             id: "text-review",
             name: "文章レビュワー",
+            description: "文章の品質をレビューする",
             model: "claude-4-sonnet",
             systemPrompt: "あなたは文章レビューの専門家です。",
             healthCheckPrompt: "Hello, respond with exactly: OK",
@@ -703,6 +706,7 @@ describe("HealthChecker", () => {
           {
             id: "text-review",
             name: "文章レビュワー",
+            description: "文章の品質をレビューする",
             model: "claude-4-sonnet",
             systemPrompt: "あなたは文章レビューの専門家です。",
             healthCheckPrompt: "Hello, respond with exactly: OK",
@@ -743,6 +747,7 @@ describe("HealthChecker", () => {
           {
             id: "text-review",
             name: "文章レビュワー",
+            description: "文章の品質をレビューする",
             model: "claude-4-sonnet",
             systemPrompt: "あなたは文章レビューの専門家です。",
             healthCheckPrompt: "Hello, respond with exactly: OK",

@@ -26,6 +26,7 @@ function createTestConfig(): AppConfig {
       {
         id: "impl-code",
         name: "コード実装者",
+        description: "コードの実装・修正を行う",
         model: "claude-4-sonnet",
         systemPrompt: "You are a code implementer.",
         healthCheckPrompt: "OK",
@@ -60,7 +61,11 @@ describe("delete_group", () => {
   });
 
   it("削除後のグループの status が deleted になっている", () => {
+    const config = createTestConfig();
     const group = manager.createGroup("削除テスト");
+    const agent = manager.startAgent(group.id, config.roles[0], "test");
+    manager.updateAgentState(agent.agentId, { status: "running" });
+    manager.updateAgentState(agent.agentId, { status: "completed" });
     handleDeleteGroup(manager, { groupId: group.id });
 
     const deleted = manager.getGroup(group.id);
@@ -91,5 +96,27 @@ describe("delete_group", () => {
 
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0][0].groupId).toBe(group.id);
+  });
+
+  it("Sequential グループ削除後に sequentialPlans から削除され getSequentialPlan が undefined を返す", () => {
+    const group = manager.createGroup("Sequential削除テスト", "sequential");
+    manager.submitSequential(group.id, [
+      { tasks: [{ role: "impl-code", prompt: "Stage 0" }] },
+      { tasks: [{ role: "impl-code", prompt: "Stage 1" }] },
+    ]);
+
+    expect(manager.getSequentialPlan(group.id)).toBeDefined();
+
+    // 全 Agent を完了させて削除可能にする
+    const agents = manager.getAgentsByGroup(group.id);
+    for (const a of agents) {
+      manager.updateAgentState(a.agentId, { status: "running" });
+      manager.updateAgentState(a.agentId, { status: "completed" });
+    }
+
+    const result = handleDeleteGroup(manager, { groupId: group.id });
+    expect(result).not.toHaveProperty("isError");
+
+    expect(manager.getSequentialPlan(group.id)).toBeUndefined();
   });
 });

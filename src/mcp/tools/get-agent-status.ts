@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AppConfig } from "../../types/index.js";
 import type { AgentManager } from "../../agent/manager.js";
+import { errorResponse } from "./error-response.js";
 
 /** get_agent_status ツールのハンドラ（テスト用にエクスポート） */
 export function handleGetAgentStatus(
@@ -14,19 +15,7 @@ export function handleGetAgentStatus(
 ) {
   const agent = manager.getAgent(args.agentId);
   if (!agent) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            error: true,
-            code: "AGENT_NOT_FOUND",
-            message: `Agent '${args.agentId}' が見つかりません`,
-          }),
-        },
-      ],
-      isError: true as const,
-    };
+    return errorResponse("AGENT_NOT_FOUND", `Agent '${args.agentId}' が見つかりません`);
   }
 
   // running 中は elapsed_ms を再計算
@@ -48,10 +37,6 @@ export function handleGetAgentStatus(
           startedAt: agent.startedAt,
           elapsed_ms,
           toolCallCount: agent.toolCallCount,
-          lastAssistantMessage: agent.lastAssistantMessage ?? null,
-          recentToolCalls: agent.recentToolCalls,
-          editedFiles: agent.editedFiles,
-          createdFiles: agent.createdFiles,
           result: agent.result,
         }),
       },

@@ -26,6 +26,7 @@ function createTestConfig(): AppConfig {
       {
         id: "impl-code",
         name: "コード実装者",
+        description: "コードの実装・修正を行う",
         model: "claude-4-sonnet",
         systemPrompt: "You are a code implementer.",
         healthCheckPrompt: "OK",
@@ -43,17 +44,19 @@ describe("get_agent_status", () => {
     manager = new AgentManager(config);
   });
 
-  it("存在しない Agent ID の場合 AGENT_NOT_FOUND エラーを返す", () => {
+  it("存在しない Agent ID の場合 AGENT_NOT_FOUND エラーを返す（形式: { error: true, code, message }, isError: true）", () => {
     const result = handleGetAgentStatus(manager, {
       agentId: "nonexistent-agent",
     });
 
     expect(result.isError).toBe(true);
     const data = JSON.parse(result.content[0].text);
+    expect(data.error).toBe(true);
     expect(data.code).toBe("AGENT_NOT_FOUND");
+    expect(typeof data.message).toBe("string");
   });
 
-  it("Agent の詳細状態を返す", () => {
+  it("Agent の詳細状態を返す（軽量レスポンス）", () => {
     const group = manager.createGroup("test");
     const agent = manager.startAgent(group.id, config.roles[0], "test prompt");
 
@@ -71,11 +74,32 @@ describe("get_agent_status", () => {
     expect(data.startedAt).toBeDefined();
     expect(typeof data.elapsed_ms).toBe("number");
     expect(typeof data.toolCallCount).toBe("number");
-    expect(data.recentToolCalls).toEqual([]);
     expect(data.result).toBeNull();
   });
 
-  it("lastAssistantMessage が null の場合も正しく返す", () => {
+  it("完了済み Agent の result に summary と response が含まれる", () => {
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(group.id, config.roles[0], "test");
+
+    manager.updateAgentState(agent.agentId, { status: "running" });
+    manager.updateAgentState(agent.agentId, { status: "completed" });
+    manager.reportResult(agent.agentId, {
+      status: "success",
+      summary: "実装完了",
+      response: "エントリーポイントを実装し、全テストがパスした。",
+    });
+
+    const result = handleGetAgentStatus(manager, {
+      agentId: agent.agentId,
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.result).not.toBeNull();
+    expect(data.result.summary).toBe("実装完了");
+    expect(data.result.response).toBe("エントリーポイントを実装し、全テストがパスした。");
+  });
+
+  it("recentToolCalls, lastAssistantMessage, editedFiles, createdFiles を返却しない", () => {
     const group = manager.createGroup("test");
     const agent = manager.startAgent(group.id, config.roles[0], "test");
 
@@ -84,6 +108,9 @@ describe("get_agent_status", () => {
     });
 
     const data = JSON.parse(result.content[0].text);
-    expect(data.lastAssistantMessage).toBeNull();
+    expect(data).not.toHaveProperty("recentToolCalls");
+    expect(data).not.toHaveProperty("lastAssistantMessage");
+    expect(data).not.toHaveProperty("editedFiles");
+    expect(data).not.toHaveProperty("createdFiles");
   });
 });

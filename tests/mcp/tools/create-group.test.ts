@@ -26,6 +26,7 @@ function createTestConfig(): AppConfig {
       {
         id: "impl-code",
         name: "コード実装者",
+        description: "コードの実装・修正を行う",
         model: "claude-4-sonnet",
         systemPrompt: "You are a code implementer.",
         healthCheckPrompt: "OK",
@@ -54,6 +55,28 @@ describe("create_group", () => {
     expect(data.description).toBe("認証機能の実装・テスト・レビュー");
     expect(data.status).toBe("active");
     expect(data.createdAt).toBeDefined();
+    expect(data.mode).toBe("concurrent");
+  });
+
+  it("mode 省略時にデフォルトで concurrent になる", () => {
+    const result = handleCreateGroup(manager, { description: "test" });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.mode).toBe("concurrent");
+
+    const group = manager.getGroup(data.groupId);
+    expect(group!.mode).toBe("concurrent");
+  });
+
+  it("mode: sequential でグループが作成できる", () => {
+    const result = handleCreateGroup(manager, {
+      description: "Sequential テスト",
+      mode: "sequential",
+    });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.mode).toBe("sequential");
+
+    const group = manager.getGroup(data.groupId);
+    expect(group!.mode).toBe("sequential");
   });
 
   it("作成されたグループが AgentManager に登録されている", () => {
@@ -73,5 +96,35 @@ describe("create_group", () => {
 
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0][0].description).toBe("イベントテスト");
+  });
+
+  it("parentGroupId を指定した場合、返却値に parentGroupId が含まれる", () => {
+    const parent = handleCreateGroup(manager, { description: "親グループ" });
+    const parentData = JSON.parse(parent.content[0].text);
+
+    const result = handleCreateGroup(manager, {
+      description: "子グループ",
+      parentGroupId: parentData.groupId,
+    });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.parentGroupId).toBe(parentData.groupId);
+  });
+
+  it("parentGroupId を省略した場合、返却値に parentGroupId が undefined である", () => {
+    const result = handleCreateGroup(manager, { description: "test" });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.parentGroupId).toBeUndefined();
+  });
+
+  it("mode: magentic でグループが作成できる", () => {
+    const result = handleCreateGroup(manager, {
+      description: "Magentic テスト",
+      mode: "magentic",
+    });
+    const data = JSON.parse(result.content[0].text);
+    expect(data.mode).toBe("magentic");
+
+    const group = manager.getGroup(data.groupId);
+    expect(group!.mode).toBe("magentic");
   });
 });

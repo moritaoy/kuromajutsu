@@ -15,6 +15,16 @@ function formatElapsed(ms) {
 }
 
 /**
+ * ツール名を短縮表示用に変換
+ * e.g. "editToolCall" → "Edit", "readToolCall" → "Read"
+ */
+function shortenToolName(rawName) {
+  if (!rawName) return "";
+  const name = rawName.replace(/ToolCall$/i, "").replace(/Tool$/i, "");
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/**
  * 詳細モーダル
  * @param {{ agent: object, onClose: function }} props
  */
@@ -64,6 +74,17 @@ function AgentDetailModal({ agent, onClose }) {
             ),
           )
         : null,
+      // レスポンス（result.response がある場合、折りたたみ式）
+      agent.result && agent.result.response
+        ? h("div", { className: "modal-section" },
+            h("details", { className: "modal-response-details" },
+              h("summary", { className: "modal-response-toggle" }, "Response（詳細レポート）"),
+              h("div", { className: "modal-section-body modal-response" },
+                agent.result.response,
+              ),
+            ),
+          )
+        : null,
       // 最新アシスタントメッセージ（result がない場合のフォールバック）
       !agent.result && agent.lastAssistantMessage
         ? h("div", { className: "modal-section" },
@@ -108,18 +129,33 @@ export function AgentCard({ agent }) {
       onClick: () => setShowModal(true),
       style: { cursor: "pointer" },
     },
-      // ヘッダー: ステータスドット + Agent ID + 職種バッジ
+      // ヘッダー: ステータスドット + Agent ID + Stage ラベル（あれば）+ 職種バッジ
       h("div", { className: "agent-card-header" },
         h("span", { className: `status-dot ${agent.status}` }),
         h("span", { className: "agent-id" }, agent.agentId),
+        agent.stageIndex != null
+          ? h("span", { className: "agent-stage-label" }, `Stage ${agent.stageIndex + 1}`)
+          : null,
         h("span", { className: `role-badge role-badge-${agent.role}` }, agent.role),
       ),
-      // ボディ: 経過時間のみ
+      // ボディ: 経過時間 + ツール活動表示
       h("div", { className: "agent-card-body" },
         h("span", { className: "agent-elapsed" },
           formatElapsed(elapsed),
           agent.status === "running" ? " \u25B6" : "",
         ),
+        agent.toolCallCount > 0
+          ? h("span", { className: "agent-activity" },
+              agent.status === "running" && agent.recentToolCalls && agent.recentToolCalls.length > 0
+                ? h("span", { className: "agent-tool-name" },
+                    shortenToolName(agent.recentToolCalls[agent.recentToolCalls.length - 1].type),
+                  )
+                : null,
+              h("span", { className: "agent-step-count" },
+                `Step ${agent.toolCallCount}`,
+              ),
+            )
+          : null,
       ),
     ),
     // モーダル

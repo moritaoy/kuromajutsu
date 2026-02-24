@@ -6,7 +6,8 @@
 |---------|------|-------------|--------|
 | create_group | グループ作成 | description | { groupId, description, createdAt, status } |
 | delete_group | グループ削除 | groupId | { deleted, groupId } |
-| run_agent | Agent を実行 | groupId, role, prompt, workingDirectory?, timeout_ms? | { agentId, groupId, role, model, status } |
+| run_agents | 1台以上の Agent を一括起動 | groupId, agents[] | { agents[], total } |
+| run_sequential | ステージ制 Sequential 実行計画を投入 | groupId, stages[] | { groupId, stages[], agents[], total } |
 | list_agents | Agent 一覧取得 | groupId?, status? | { agents[], total } |
 | get_agent_status | Agent 詳細取得 | agentId | { agentId, groupId, status, toolCallCount, ... } |
 | wait_agent | Agent 完了待機 | agentIds, timeout_ms?, mode? | { completed[], pending[], timedOut } |
@@ -19,10 +20,11 @@
 src/mcp/
 ├── server.ts             # MCPサーバー本体（@modelcontextprotocol/sdk、stdio トランスポート）
 └── tools/
-    ├── index.ts          # 全8ツールの一括登録エントリーポイント
+    ├── index.ts          # 全9ツールの一括登録エントリーポイント
     ├── create-group.ts   # create_group ツール定義・ハンドラ
     ├── delete-group.ts   # delete_group ツール定義・ハンドラ
-    ├── run-agent.ts      # run_agent ツール定義・ハンドラ
+    ├── run-agents.ts     # run_agents ツール定義・ハンドラ
+    ├── run-sequential.ts # run_sequential ツール定義・ハンドラ
     ├── list-agents.ts    # list_agents ツール定義・ハンドラ
     ├── get-agent-status.ts # get_agent_status ツール定義・ハンドラ
     ├── wait-agent.ts     # wait_agent ツール定義・ハンドラ
@@ -41,13 +43,13 @@ MCPサーバー本体。`@modelcontextprotocol/sdk` の `McpServer` クラスを
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-// createMcpServer(config) → McpServer を生成し、registerTools で 8 ツールを登録
+// createMcpServer(config) → McpServer を生成し、registerTools で 9 ツールを登録
 // startMcpServer(server) → StdioServerTransport で接続
 ```
 
 ### tools/index.ts
 
-全 8 ツールを `registerTools(server, config)` で一括登録する。各ツールハンドラには `AgentManager` インスタンスを注入する。
+全 9 ツールを `registerTools(server, config)` で一括登録する。各ツールハンドラには `AgentManager` インスタンスを注入する。
 
 **依存関係の注入パターン:**
 
@@ -60,7 +62,8 @@ export function registerTools(
 ): void {
   registerCreateGroup(server, config, manager);
   registerDeleteGroup(server, config, manager);
-  registerRunAgent(server, config, manager);
+  registerRunAgents(server, config, manager);
+  registerRunSequential(server, config, manager);
   registerListAgents(server, config, manager);
   registerGetAgentStatus(server, config, manager);
   registerWaitAgent(server, config, manager);
@@ -97,35 +100,65 @@ export function registerTools(
   - `GROUP_NOT_FOUND`: 指定された groupId が存在しない
   - `GROUP_HAS_RUNNING_AGENTS`: 実行中の Agent が存在する
 
-### run_agent
+### run_agents
 
-- **入力:** `{ groupId, role, prompt, workingDirectory?, timeout_ms? }`
+- **入力:** `{ groupId, agents: [{ role, prompt, workingDirectory?, timeout_ms? }, ...] }`
 - **Zod スキーマ:**
   ```typescript
   {
     groupId: z.string().describe("所属するグループ ID"),
-    role: z.string().describe("職種 ID（例: impl-code）"),
-    prompt: z.string().describe("Agent に渡すユーザープロンプト"),
-    workingDirectory: z.string().optional().describe("作業ディレクトリ"),
-    timeout_ms: z.number().optional().describe("タイムアウト（ミリ秒）"),
+    agents: z.array(agentSchema).min(1).describe("起動する Agent の定義配列"),
   }
+  // agentSchema = { role, prompt, workingDirectory?, timeout_ms? }
   ```
 - **処理:**
-  1. `AgentManager.getGroup(groupId)` で存在・アクティブチェック → エラーハンドリング
-  2. `config.roles.find(r => r.id === role)` で職種の存在チェック → 無ければエラー
-  3. `AgentManager.getHealthCheckResult(role)` で利用可能チェック → 不可ならエラー
-  4. `AgentManager.getRunningCount()` で同時実行数チェック → 上限到達ならエラー
-  5. ID 発番: `{role}-{Math.floor(Date.now()/1000)}-{random4hex}`
-  6. `AgentState` を構築し `AgentManager.startAgent(agentState, roleDef, prompt)` に委譲
-  7. AgentManager 内で AgentExecutor を起動し、グループの agentIds に追加
-  8. `AgentManager.emit("agent:created", agentState)` で WebSocket 通知
-- **出力:** `{ agentId, groupId, role, model, status: "queued" }`
+  1. `AgentManager.getGroup(groupId)` で存在・アクティブ・モードチェック（concurrent 必須）→ エラーハンドリング
+  2. 全タスクの `role` を事前検証（存在チェック・ヘルスチェック結果）
+  3. `AgentManager.getRunningCount()` で同時実行数チェック → 上限到達ならエラー
+  4. `AgentManager.startAgents(groupId, taskDefs)` に委譲
+  5. AgentManager 内で各 Agent を起動し、グループの agentIds に追加
+  6. 各 Agent について `AgentManager.emit("agent:created", agentState)` で WebSocket 通知
+- **出力:** `{ agents: [{ agentId, groupId, role, model, status }], total }`
 - **エラー:**
+  - `EMPTY_AGENTS`: agents 配列が空
   - `GROUP_NOT_FOUND`: groupId が存在しない
   - `GROUP_NOT_ACTIVE`: グループが active でない
+  - `MODE_MISMATCH`: グループが concurrent でない
   - `ROLE_NOT_FOUND`: 指定された職種が存在しない
   - `ROLE_UNAVAILABLE`: 職種がヘルスチェック未通過
   - `MAX_CONCURRENT_REACHED`: 同時実行上限に到達
+  - `AGENTS_START_FAILED`: 起動中にエラー
+
+### run_sequential
+
+- **入力:** `{ groupId, stages: [{ tasks: [{ role, prompt, workingDirectory?, timeout_ms? }] }] }`
+- **Zod スキーマ:**
+  ```typescript
+  {
+    groupId: z.string().describe("所属するグループ ID（mode: sequential で作成済み）"),
+    stages: z.array(stageSchema).min(1).describe("実行ステージの配列（先頭から順に実行）"),
+  }
+  // stageSchema = { tasks: z.array(taskSchema).min(1) }
+  // taskSchema = { role, prompt, workingDirectory?, timeout_ms? }
+  ```
+- **処理:**
+  1. stages が空でないこと、各ステージの tasks が空でないことを検証
+  2. `AgentManager.getGroup(groupId)` で存在・アクティブ・モードチェック（sequential 必須）→ エラーハンドリング
+  3. 全ステージの全タスクの `role` を事前検証
+  4. 最大ステージタスク数で `maxConcurrent` 残枠をチェック
+  5. `AgentManager.submitSequential(groupId, stages)` に委譲
+  6. 第1ステージの Agent を起動し、以降は完了に応じて次ステージを自動起動
+- **出力:** `{ groupId, totalStages, currentStageIndex, stages: [{ stageIndex, agentIds }], agents: [...], total }`
+- **エラー:**
+  - `EMPTY_STAGES`: stages 配列が空
+  - `EMPTY_STAGE_TASKS`: いずれかのステージの tasks が空
+  - `GROUP_NOT_FOUND`: groupId が存在しない
+  - `GROUP_NOT_ACTIVE`: グループが active でない
+  - `MODE_MISMATCH`: グループが sequential でない
+  - `ROLE_NOT_FOUND`: 指定された職種が存在しない
+  - `ROLE_UNAVAILABLE`: 職種がヘルスチェック未通過
+  - `MAX_CONCURRENT_REACHED`: 最大ステージタスク数が残枠を超える
+  - `SEQUENTIAL_START_FAILED`: 計画投入中にエラー
 
 ### list_agents
 
@@ -243,13 +276,19 @@ return {
 
 | コード | 説明 | 発生するツール |
 |--------|------|--------------|
-| `GROUP_NOT_FOUND` | グループが存在しない | delete_group, run_agent |
-| `GROUP_NOT_ACTIVE` | グループが active でない | run_agent |
+| `GROUP_NOT_FOUND` | グループが存在しない | delete_group, run_agents, run_sequential |
+| `GROUP_NOT_ACTIVE` | グループが active でない | run_agents, run_sequential |
 | `GROUP_HAS_RUNNING_AGENTS` | 実行中 Agent が残っている | delete_group |
-| `ROLE_NOT_FOUND` | 職種が存在しない | run_agent |
-| `ROLE_UNAVAILABLE` | 職種がヘルスチェック未通過 | run_agent |
-| `MAX_CONCURRENT_REACHED` | 同時実行上限 | run_agent |
+| `ROLE_NOT_FOUND` | 職種が存在しない | run_agents, run_sequential |
+| `ROLE_UNAVAILABLE` | 職種がヘルスチェック未通過 | run_agents, run_sequential |
+| `MAX_CONCURRENT_REACHED` | 同時実行上限 | run_agents, run_sequential |
+| `MODE_MISMATCH` | グループモードがツールと不一致 | run_agents, run_sequential |
 | `AGENT_NOT_FOUND` | Agent が存在しない | get_agent_status, wait_agent, report_result |
+| `EMPTY_AGENTS` | agents 配列が空 | run_agents |
+| `EMPTY_STAGES` | stages 配列が空 | run_sequential |
+| `EMPTY_STAGE_TASKS` | ステージの tasks が空 | run_sequential |
+| `AGENTS_START_FAILED` | Agent 一括起動に失敗 | run_agents |
+| `SEQUENTIAL_START_FAILED` | Sequential 計画投入に失敗 | run_sequential |
 
 ## テスト方針
 
@@ -266,7 +305,8 @@ tests/mcp/
 ├── tools/
 │   ├── create-group.test.ts
 │   ├── delete-group.test.ts
-│   ├── run-agent.test.ts
+│   ├── run-agents.test.ts
+│   ├── run-sequential.test.ts
 │   ├── list-agents.test.ts
 │   ├── get-agent-status.test.ts
 │   ├── wait-agent.test.ts
@@ -284,7 +324,8 @@ tests/mcp/
 | 3 | create_group | AgentManager.createGroup を呼び出す | AgentManager 基盤 |
 | 4 | delete_group | 存在チェック・実行中チェック後に削除 | AgentManager 基盤 |
 | 5 | list_roles | 設定読み込み + ヘルスチェック結果付与 | config |
-| 6 | run_agent | 検証 → Agent 起動を AgentManager に委譲 | AgentManager + AgentExecutor |
+| 6 | run_agents | 検証 → Agent 一括起動を AgentManager に委譲 | AgentManager + AgentExecutor |
+| 6b | run_sequential | 検証 → Sequential 実行計画を AgentManager に投入 | AgentManager + AgentExecutor |
 | 7 | list_agents | AgentManager からフィルタ付き一覧取得 | AgentManager |
 | 8 | get_agent_status | AgentManager から詳細状態取得 | AgentManager |
 | 9 | wait_agent | Promise ベースの完了待機 | AgentManager |

@@ -11,16 +11,18 @@
 |------|---------|------|
 | エージェント | Agent | Cursor CLI ヘッドレスモードで起動される独立した AI 実行単位。子プロセスとして動作する |
 | メインエージェント | Main Agent | Cursor IDE 上でユーザーと直接対話する Agent。kuromajutsu の MCP ツールを呼び出して複数のサブ Agent を管理する |
-| サブエージェント | Sub Agent | メインエージェントから `run_agent` で起動される Agent。特定の職種に基づいて動作する |
+| サブエージェント | Sub Agent | メインエージェントから `run_agents` で起動される Agent。1台以上の Agent を一括起動し、特定の職種に基づいて動作する |
 | 職種 / ロール | Role | Agent に割り当てる役割の定義。システムプロンプト、モデル、ツールセット等で構成される |
 | グループ | Group | 関連する Agent の実行をまとめる論理的な単位。`create_group` で作成し、Agent 実行時に `groupId` を指定して紐付ける |
+| Magentic パターン | Magentic Pattern | Microsoft Research が提唱するマルチエージェントオーケストレーションパターン。Orchestrator Agent が計画→委任→評価→リプランのループでタスクを自律的に遂行する |
+| オーケストレーター | Orchestrator | Magentic パターンの中核 Agent。タスクの分析・計画立案・サブ Agent への委任・結果評価・リプランニングを自律的に行う。`orchestrator` ロール（opus-4.6-thinking）で実行される |
 
 ## プロトコル・通信
 
 | 用語 | 英語表記 | 定義 |
 |------|---------|------|
 | MCPサーバー | MCP Server | Model Context Protocol に準拠したサーバー。Cursor と stdio で通信し、ツールを提供する |
-| MCPツール | MCP Tool | MCPサーバーが公開する操作。`create_group`, `delete_group`, `run_agent`, `list_agents`, `get_agent_status`, `wait_agent`, `report_result`, `list_roles` の8つ |
+| MCPツール | MCP Tool | MCPサーバーが公開する操作。`create_group`, `delete_group`, `run_agents`, `run_sequential`, `run_magentic`, `list_agents`, `get_agent_status`, `wait_agent`, `report_result`, `list_roles` の10個 |
 | stdio | Standard I/O | 標準入出力。MCPサーバーと Cursor 間の通信トランスポート |
 | WebSocket | WebSocket | 双方向リアルタイム通信プロトコル。ダッシュボード UI とサーバー間で使用 |
 
@@ -35,6 +37,11 @@
 | Group ID | Group ID | グループの一意識別子。`grp-{unixTimestamp}-{random4hex}` 形式 |
 | AgentResult | Agent Result | Agent 実行完了後の結果データ。サマリ、編集ファイル一覧、所要時間等を含む |
 | AgentState | Agent State | Agent の現在の状態を表すデータ構造。ステータス、経過時間、ツール呼び出し数等を含む |
+| 親グループ | Parent Group | Magentic モードで `run_magentic` により作成されるトップレベルのグループ。Orchestrator Agent を内包し、子グループの管理単位となる |
+| 子グループ | Child Group | Orchestrator が `create_group` で作成するサブタスク用グループ。`parentGroupId` により親グループに紐付く |
+| Ledger | Ledger | Orchestrator が各反復の冒頭で整理する進捗台帳。【現状】【残課題】【次のアクション】の構造で管理する |
+| 完了条件 | Completion Criteria | Magentic パターンで Orchestrator がタスク完了を判定するための基準。`run_magentic` の必須パラメータとして指定する |
+| 操作範囲 | Scope | Magentic パターンで Orchestrator とサブ Agent が変更してよいファイル・ディレクトリの範囲。`run_magentic` の必須パラメータとして指定する |
 
 ## UI・システム
 
@@ -65,13 +72,14 @@
 | ExecutorOptions | Executor Options | `AgentExecutor.execute()` に渡すオプション型。`model`, `prompt`, `workingDirectory?`, `timeout_ms?` で構成。`src/agent/executor.ts` で定義 |
 | ExecutorCallbacks | Executor Callbacks | `AgentExecutor.execute()` に渡すコールバック群の型。`onStreamEvent`, `onExit`, `onError` の3つ。`src/agent/executor.ts` で定義 |
 | availableModels | Available Models | ヘルスチェック時に `agent models` コマンドで取得した、Cursor で利用可能なモデル名の一覧。AgentManager に保持され、`list_roles` レスポンスのトップレベルフィールドとして返却される |
-| registerTools | Register Tools | 全 8 つの MCP ツールを McpServer に一括登録する関数。各ツールハンドラに AgentManager を注入する。`src/mcp/tools/index.ts` に実装 |
+| registerTools | Register Tools | 全 10 個の MCP ツールを McpServer に一括登録する関数。各ツールハンドラに AgentManager を注入する。`src/mcp/tools/index.ts` に実装 |
 | handle* 関数 | Handle Functions | 各 MCP ツールのビジネスロジックをエクスポートした関数群（`handleCreateGroup`, `handleDeleteGroup` 等）。テストから直接呼び出し可能にするため、`server.tool()` コールバックとは分離して定義。`src/mcp/tools/*.ts` に実装 |
 | errorResponse | Error Response | MCP ツールがエラーを返す際の共通ヘルパー関数。`{ content: [{ type: "text", text: JSON.stringify({ error, code, message }) }], isError: true }` 形式のレスポンスを構築する |
 | HealthChecker | Health Checker | MCPサーバー起動時にモデル検証とヘルスチェックプロンプトを実行するコンポーネント。`agent models` でモデル一覧を取得し、各職種のモデルを照合後、`healthCheckPrompt` を Cursor CLI で実行する。`src/health/checker.ts` に実装 |
 | CliRunner | CLI Runner | CLI コマンドを実行するインターフェース。`execCommand(command, args)` メソッドを持ち、テスト時にモックに差し替えることで HealthChecker の単体テストを可能にする。`src/health/checker.ts` で定義 |
 | DefaultCliRunner | Default CLI Runner | `CliRunner` インターフェースの実プロセス実装。`child_process.execFile` で CLI コマンドを実行する。60秒タイムアウト付き |
 | HealthCheckCallbacks | Health Check Callbacks | HealthChecker の進行状況を外部に通知するコールバック型。`onModelValidation`, `onRoleCheckStart`, `onRoleCheckComplete`, `onComplete` の4つのオプショナルコールバックで構成。`index.ts` でダッシュボード WebSocket イベントへの中継に使用 |
+| MagenticConfig | Magentic Config | Magentic 実行設定を保持する型。task, completionCriteria, scope, constraints, context, availableRoles, maxIterations 等のフィールドで構成される |
 
 ## UI コンポーネント
 

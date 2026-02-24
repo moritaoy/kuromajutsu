@@ -157,6 +157,7 @@ describe("buildFullPrompt のツール注入確認（AgentManager）", () => {
     const role: RoleDefinition = {
       id: "test-role",
       name: "テストロール",
+      description: "テスト用ロール",
       systemPrompt: "あなたはテスト用の Agent です。",
       model: "claude-4-sonnet",
       tools: [],
@@ -178,6 +179,7 @@ describe("buildFullPrompt のツール注入確認（AgentManager）", () => {
     const role: RoleDefinition = {
       id: "test-role",
       name: "テストロール",
+      description: "テスト用ロール",
       systemPrompt: "あなたはテスト用の Agent です。",
       model: "claude-4-sonnet",
       tools: ["textlint"],
