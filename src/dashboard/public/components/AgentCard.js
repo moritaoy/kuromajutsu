@@ -137,6 +137,12 @@ export function AgentCard({ agent }) {
           ? h("span", { className: "agent-stage-label" }, `Stage ${agent.stageIndex + 1}`)
           : null,
         h("span", { className: `role-badge role-badge-${agent.role}` }, agent.role),
+        agent.provider
+          ? h("span", {
+              className: `provider-badge provider-badge-${agent.provider}`,
+              title: `${agent.provider} / ${agent.model}`,
+            }, agent.provider)
+          : null,
       ),
       // ボディ: 経過時間 + ツール活動表示
       h("div", { className: "agent-card-body" },

@@ -1,12 +1,12 @@
 # Kuromajutsu 仕様書
 
-> Cursor Agent 並列実行管理システム
+> Cursor / Claude マルチ Provider Agent 並列実行管理システム
 
 ## 1. システム概要
 
 ### 1.1 目的
 
-Kuromajutsu は、Cursor の MCP（Model Context Protocol）サーバーとして動作し、メインの Cursor Agent から複数のサブ Agent を並列に起動・管理するためのシステムである。各 Agent は「職種（Role）」として定義された役割に基づいて動作し、コード実装、レビュー、テスト作成などのタスクを並行して処理できる。
+Kuromajutsu は、MCP（Model Context Protocol）サーバーとして動作し、メイン Agent（Cursor / Claude Code など）から複数のサブ Agent を並列に起動・管理するためのシステムである。サブ Agent の実行基盤（**Provider**）として Cursor CLI と Claude Code CLI の両方に対応し、職種ごとに Provider とモデルを指定することで、複数 Provider のモデルを混在させて並列実行できる。各 Agent は「職種（Role）」として定義された役割に基づいて動作し、コード実装、レビュー、テスト作成などのタスクを並行して処理できる。
 
 Agent の実行は必ず「グループ（Group）」に所属させる。グループは関連するタスク群をまとめる単位であり、MCP ツール経由で事前に作成する。グループには目的の簡潔な説明を登録し、一意の ID が発番される。これにより、ダッシュボード UI 上で Agent をグループ単位で整理・表示でき、タスクの見通しが向上する。
 
@@ -14,10 +14,10 @@ Agent の実行は必ず「グループ（Group）」に所属させる。グル
 
 ```mermaid
 graph TB
-    CursorMain["Cursor メインAgent"] -->|"MCP (stdio)"| MCPServer["kuromajutsu MCPサーバー"]
-    MCPServer -->|"agent -p --force"| Agent1["Agent 1 (impl-code)"]
-    MCPServer -->|"agent -p --force"| Agent2["Agent 2 (code-review)"]
-    MCPServer -->|"agent -p --force"| Agent3["Agent N ..."]
+    MainAgent["メインAgent (Cursor / Claude Code)"] -->|"MCP (stdio / HTTP)"| MCPServer["kuromajutsu MCPサーバー"]
+    MCPServer -->|"Provider: cursor<br/>agent -p --force"| Agent1["Agent 1 (impl-code / cursor)"]
+    MCPServer -->|"Provider: claude<br/>claude -p"| Agent2["Agent 2 (code-review / claude)"]
+    MCPServer -->|"Provider 混在可"| Agent3["Agent N ..."]
     MCPServer -->|"HTTP :9696"| Dashboard["ダッシュボードUI (React)"]
     Agent1 -->|"stream-json"| MCPServer
     Agent2 -->|"stream-json"| MCPServer
@@ -32,13 +32,13 @@ graph TB
 | MCPサーバー | TypeScript + Node.js（`@modelcontextprotocol/sdk`、stdio トランスポート） |
 | ダッシュボードUI | React（MCPサーバーが内蔵HTTPサーバーでホスティング） |
 | リアルタイム通信 | WebSocket（UI ⇔ MCPサーバー間） |
-| Agent実行 | Cursor CLI ヘッドレスモード |
+| Agent実行 | Provider 抽象化（Cursor CLI `agent` / Claude Code CLI `claude` のヘッドレスモード） |
 | 設定管理 | YAML（`kuromajutsu.config.yaml`） |
 | コンテナ実行環境 | Docker / Docker Compose |
 
 ### 1.3.1 実行環境
 
-テスト・ビルドは Docker コンテナ内で実行する。開発実行（`npm run dev`）は Cursor CLI（`agent` コマンド）を必要とするため、ホスト上で直接実行する。
+テスト・ビルドは Docker コンテナ内で実行する。開発実行（`npm run dev`）は Cursor CLI（`agent` コマンド）および Claude Code CLI（`claude` コマンド）を必要とするため、ホスト上で直接実行する。
 
 **開発実行（ホスト）:**
 
@@ -46,7 +46,7 @@ graph TB
 # セットアップ（初回のみ）
 npm install
 
-# 開発モード（ホットリロード付き、Cursor CLI 利用可能）
+# 開発モード（ホットリロード付き、Cursor CLI / Claude Code CLI 利用可能）
 npm run dev
 ```
 
@@ -63,7 +63,7 @@ docker compose run --rm app npm test
 **ダッシュボード確認のみ（Docker）:**
 
 ```bash
-# Docker でダッシュボードを起動（Cursor CLI 機能は動作しない）
+# Docker でダッシュボードを起動（Cursor CLI / Claude Code CLI 機能は動作しない）
 docker compose up
 ```
 
@@ -76,10 +76,10 @@ docker compose up
 
 ### 1.4 動作原理
 
-1. Cursor のメイン Agent が MCP ツール `create_group` でグループを作成する
+1. メイン Agent が MCP ツール `create_group` でグループを作成する
 2. メイン Agent が `run_agents`（または `run_sequential`）にグループ ID を指定して Agent を起動する
-3. MCPサーバーが Cursor CLI をヘッドレスモード（`agent -p --force`）で子プロセスとして起動する
-4. 子プロセスの出力を `--output-format stream-json --stream-partial-output` でリアルタイムにパースし、進捗を追跡する
+3. MCPサーバーが職種の `provider` に対応する CLI（Cursor: `agent -p --force` / Claude: `claude -p`）をヘッドレスモードで子プロセスとして起動する
+4. 子プロセスの `stream-json` 出力を Provider ごとのノーマライザで共通イベント形式に変換し、リアルタイムにパースして進捗を追跡する
 5. メイン Agent は `wait_agent` で完了を待機し、`report_result` で結果を収集する
 6. 用が済んだら `delete_group` でグループを削除する
 7. ダッシュボード UI は WebSocket 経由でリアルタイムにすべての Agent の状態をグループ単位で表示する
@@ -96,7 +96,7 @@ docker compose up
 
 ### 2.2 提供ツール一覧
 
-MCPサーバーは以下の **10個のツール** を提供する。
+MCPサーバーは以下の **11個のツール** を提供する。
 
 | ツール名 | 説明 |
 |---|---|
@@ -110,6 +110,7 @@ MCPサーバーは以下の **10個のツール** を提供する。
 | `wait_agent` | Agent の完了を待機する |
 | `report_result` | Agent の実行結果を登録する |
 | `list_roles` | 利用可能な職種一覧を返す |
+| `update_ledger` | Magentic モードの台帳（Ledger）を更新する |
 
 #### 2.2.1 `create_group` — グループを作成する
 
@@ -191,6 +192,7 @@ MCPサーバーは以下の **10個のツール** を提供する。
       "groupId": "grp-1739487600-b4e1",
       "role": "impl-code",
       "model": "claude-4-sonnet",
+      "provider": "claude",
       "status": "queued"
     }
   ],
@@ -205,7 +207,7 @@ MCPサーバーは以下の **10個のツール** を提供する。
 2. 各 Agent の `role` が存在し、利用可能（ヘルスチェック通過済み）か検証する
 3. 各 Agent に ID を `{role}-{timestamp}-{random4}` 形式で発番する
 4. Agent をグループに紐付けて管理テーブルに登録する
-5. Cursor CLI を各 Agent ごとに起動する
+5. 各 Agent の職種に設定された Provider の CLI（Cursor / Claude Code）を Agent ごとに起動する
 6. 子プロセスの stream-json 出力をリアルタイムでパースし、内部状態を更新する
 7. WebSocket 経由でダッシュボード UI に通知する
 
@@ -258,6 +260,7 @@ MCPサーバーは以下の **10個のツール** を提供する。
       "groupId": "grp-1739487600-b4e1",
       "role": "impl-code",
       "model": "claude-4-sonnet",
+      "provider": "claude",
       "status": "running",
       "startedAt": "2026-02-13T12:00:00.000Z",
       "elapsed_ms": 15000,
@@ -286,6 +289,7 @@ MCPサーバーは以下の **10個のツール** を提供する。
   "groupId": "grp-1739487600-b4e1",
   "role": "impl-code",
   "model": "claude-4-sonnet",
+  "provider": "claude",
   "status": "running",
   "startedAt": "2026-02-13T12:00:00.000Z",
   "elapsed_ms": 15000,
@@ -375,13 +379,15 @@ Agent の実行完了後に、結果データを登録する。このツール�
       "id": "impl-code",
       "name": "コード実装者",
       "description": "コードの実装・修正を行う。新機能の追加、バグ修正、リファクタリングなど、ファイルの編集を伴うタスクに使用する",
-      "model": "claude-4-sonnet"
+      "provider": "claude",
+      "model": "sonnet"
     },
     {
       "id": "code-review",
       "name": "コードレビュワー",
       "description": "コードの品質をレビューする。実装完了後の品質チェック、セキュリティ・パフォーマンス観点のフィードバックに使用する。ファイルの編集は行わない",
-      "model": "claude-4-sonnet"
+      "provider": "cursor",
+      "model": "composer-2.5-fast"
     }
   ]
 }
@@ -420,6 +426,52 @@ Magentic パターン（Orchestrator Agent による自律管理）でタスク�
 2. `orchestrator` ロール（opus-4.6-thinking）で Orchestrator Agent を起動する
 3. Orchestrator のプロンプトに task, completionCriteria, scope, constraints, context, availableRoles, maxIterations を注入する
 4. Orchestrator が自律的に計画→委任→評価→リプランのループを実行する（サブ Agent は `create_group` + `run_agents` で起動）
+
+#### 2.2.11 `update_ledger` — Magentic モードの台帳を更新する
+
+Magentic モードの台帳（Ledger）を更新する。Orchestrator Agent が自身の計画・進捗判定を記録するために使用する。Magentic グループでのみ利用可能。
+
+**入力パラメータ:**
+
+| パラメータ | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `groupId` | `string` | はい | 対象の Magentic グループ ID |
+| `type` | `string` | はい | 台帳の種別: `task`（タスク台帳）または `progress`（進捗台帳） |
+| `facts` | `object` | いいえ | タスク台帳: 事実の分類（`type=task` 時に必須） |
+| `plan` | `string[]` | いいえ | タスク台帳: 実行計画ステップ（`type=task` 時に必須） |
+| `scheduledSteps` | `ScheduledStep[]` | いいえ | タスク台帳: 構造化された作業予定。各ステップに role, description, status, dependsOn を指定（type=task 時のオプション） |
+| `isRequestSatisfied` | `object` | いいえ | 進捗台帳: リクエストが満たされたか（`type=progress` 時に必須） |
+| `isInLoop` | `object` | いいえ | 進捗台帳: ループに陥っていないか（`type=progress` 時に必須） |
+| `isProgressBeingMade` | `object` | いいえ | 進捗台帳: 進捗が出ているか（`type=progress` 時に必須） |
+| `nextAction` | `object` | いいえ | 進捗台帳: 次のアクション（`type=progress` 時に必須） |
+| `instruction` | `object` | いいえ | 進捗台帳: サブ Agent への指示（`type=progress` 時に必須） |
+| `iteration` | `number` | いいえ | 進捗台帳: 現在の反復番号（`type=progress` 時に必須） |
+
+**返却値（`type=task` の場合）:**
+
+```json
+{
+  "groupId": "grp-xxx",
+  "type": "task",
+  "status": "updated",
+  "nextRunnableSteps": [
+    { "stepId": "s2", "role": "impl-code", "description": "認証ミドルウェアの実装" },
+    { "stepId": "s3", "role": "impl-test", "description": "認証テストの作成" }
+  ]
+}
+```
+
+`nextRunnableSteps` は `scheduledSteps` 指定時のみ含まれる。依存が全て resolved（completed/skipped）な pending ステップの一覧。
+
+**返却値（`type=progress` の場合）:**
+
+```json
+{
+  "groupId": "grp-xxx",
+  "type": "progress",
+  "status": "updated"
+}
+```
 
 ---
 
@@ -493,7 +545,9 @@ interface RoleDefinition {
   description: string;
   /** Agent に渡すシステムプロンプト */
   systemPrompt: string;
-  /** 使用する LLM モデル名（Cursor CLI の -m オプションに渡す値） */
+  /** Agent の実行基盤（Provider）。省略時は "cursor"（後方互換） */
+  provider?: "cursor" | "claude";
+  /** 使用する LLM モデル名（Provider の CLI の --model に渡す値） */
   model: string;
   /** 使用可能なツール ID の一覧（ツールレジストリで定義されたツールを参照） */
   tools?: string[];
@@ -501,6 +555,10 @@ interface RoleDefinition {
   healthCheckPrompt: string;
 }
 ```
+
+- 1 職種は 1 つの Provider と 1 つのモデルを持つ。職種ごとに Provider を変えることで、Cursor モデルと Claude モデルを混在させて運用できる
+- `provider` を省略した職種は `cursor` として扱う（既存設定ファイルとの後方互換）
+- モデル名の書式は Provider ごとに異なる（Cursor: `agent models` の ID、Claude: エイリアス `sonnet` / `opus` / `haiku` または `claude-*` の完全 ID）
 
 ### 4.2 初期職種一覧
 
@@ -658,20 +716,49 @@ stateDiagram-v2
 - 例: `impl-code-1739487600-a3f2`
 - Agent 管理テーブル（インメモリ Map）のキーとして使用する
 
-### 5.3 Cursor CLI 起動コマンド
+### 5.3 Agent 起動コマンド（Provider 別）
+
+Agent の実行は Provider 抽象（`AgentProvider`）を介して行う。`AgentExecutor` は職種の `provider` に対応する Provider からコマンドを組み立て、子プロセスとして起動する。
+
+#### Provider 一覧
+
+| Provider ID | CLI | モデル一覧取得 | モデル検証 |
+|---|---|---|---|
+| `cursor` | `agent`（Cursor CLI） | `agent models` | 一覧に存在するか照合 |
+| `claude` | `claude`（Claude Code CLI） | なし（静的なエイリアス一覧） | エイリアス（`default` / `sonnet` / `opus` / `haiku` / `opusplan`）または `claude-` で始まる完全 ID |
+
+#### Cursor Provider
 
 ```bash
 agent -p --force \
-  -m "{role.model}" \
+  --model "{role.model}" \
   --output-format stream-json \
   --stream-partial-output \
   "{fullPrompt}"
 ```
 
 - `--force`: 確認なしでファイル変更を許可
-- `-m`: 職種に設定されたモデルを指定
+- `--model`: 職種に設定されたモデルを指定
 - `--output-format stream-json`: NDJSON 形式でイベントをストリーム出力
 - `--stream-partial-output`: 文字単位のリアルタイム差分を有効化
+- `report_result` は Cursor が読み込む `.cursor/mcp.json` 経由で呼び出される
+
+#### Claude Provider
+
+```bash
+claude -p "{fullPrompt}" \
+  --model "{role.model}" \
+  --output-format stream-json \
+  --verbose \
+  --permission-mode "{providers.claude.permissionMode}" \
+  --mcp-config '{"mcpServers":{"kuromajutsu":{"type":"http","url":"http://localhost:{port}/mcp"}}}'
+```
+
+- `-p`: ヘッドレス（非対話）モード。直後にプロンプトを渡す（`--mcp-config` は可変長引数のため、プロンプトを先に置く）
+- `--verbose`: `stream-json` 出力に必須
+- `--permission-mode`: 無人実行のため、デフォルトは `bypassPermissions`（Cursor の `--force` と同等）。`providers.claude.permissionMode` で変更できる（`acceptEdits` 等にするとシェル実行などが拒否される場合がある）
+- `--mcp-config`: サブ Agent が `report_result` を呼べるよう、kuromajutsu の HTTP MCP エンドポイント（`dashboard.port`）を明示的に渡す
+- 認証はホストの Claude Code ログイン（または `ANTHROPIC_API_KEY`）を利用する
 
 #### 5.3.1 プロンプト構築
 
@@ -739,7 +826,22 @@ report_result を呼ばないとメイン Agent が結果を受け取れませ�
 
 ### 5.4 stream-json パース
 
-Cursor CLI が出力する NDJSON の各イベントタイプをパースして Agent の状態を更新する:
+各 Provider の `stream-json`（NDJSON）は **Provider ノーマライザ** で共通イベント形式（Cursor 形式）に変換してから `AgentManager` に渡す。Cursor Provider は変換なし（恒等）、Claude Provider は以下のとおり変換する。
+
+| Claude の出力 | 共通イベントへの変換 |
+|---|---|
+| `system` (subtype: `init`) | そのまま `system` / `init` |
+| `assistant` の `text` ブロック | `assistant`（`message.content[0].text` にテキストを集約） |
+| `assistant` の `thinking` ブロック | `thinking` |
+| `assistant` の `tool_use` ブロック | `tool_call` / `started`（`call_id` = `tool_use.id`） |
+| `user` の `tool_result` ブロック | `tool_call` / `completed`（`is_error` なら `result.error`、それ以外は `result.success`） |
+| `result` (is_error でない) | `result` / `success`（`duration_ms` を引き継ぐ） |
+| `result` (is_error) | `result` / `error` |
+| その他（`stream_event` 等） | 無視 |
+
+ツール名の対応: `Edit` / `MultiEdit` / `Write` / `NotebookEdit` → `editToolCall`（`args.path` に `file_path` / `notebook_path` を設定）、`Read` → `readToolCall`、`Bash` → `shellToolCall`、`Grep` → `grepToolCall`、`Glob` → `globToolCall`、その他 → `{ツール名}ToolCall`。
+
+共通イベントの処理:
 
 | イベント type | 処理 |
 |---|---|
@@ -747,7 +849,7 @@ Cursor CLI が出力する NDJSON の各イベントタイプをパースして 
 | `user` | ユーザープロンプトの送信を記録 |
 | `assistant` | 最新のアシスタントメッセージを保持 |
 | `tool_call` (subtype: `started`) | ツール呼び出しカウントをインクリメント。呼び出し中のツール情報を記録 |
-| `tool_call` (subtype: `completed`) | ツール実行結果を記録。writeToolCall の場合はファイル一覧を更新 |
+| `tool_call` (subtype: `completed`) | ツール実行結果を記録。`editToolCall` の場合はファイル一覧を更新 |
 | `result` | Agent 実行完了。duration_ms と最終テキストを記録。ステータスを更新 |
 
 ### 5.5 タイムアウト処理
@@ -783,6 +885,8 @@ interface AgentResult {
   duration_ms: number;
   /** 使用モデル */
   model: string;
+  /** 使用 Provider（cursor | claude） */
+  provider: "cursor" | "claude";
   /** 職種 ID */
   role: string;
   /** ツール呼び出し回数 */
@@ -815,6 +919,27 @@ interface AgentResult {
 
 > **注:** `report_result` は `running` 状態でも受け付ける。サブ Agent が MCP 経由で `report_result` を呼ぶタイミングは、Agent プロセスが終了する前（`result` イベント受信前）であるため、`running` 状態での呼び出しが正常なフローである。
 
+### 6.4 Magentic 台帳データ構造
+
+`update_ledger` ツールで使用するタスク台帳のデータ構造。
+
+```typescript
+interface ScheduledStep {
+  stepId: string;        // ステップ ID
+  role: string;          // 使用する職種 ID
+  description: string;   // タスクの説明
+  status: "pending" | "in_progress" | "completed" | "skipped";
+  dependsOn?: string[];  // 依存する stepId の配列
+}
+
+interface TaskLedger {
+  facts: { given: string[]; toInvestigate: string[]; toDerive: string[]; assumptions: string[] };
+  plan: string[];
+  scheduledSteps?: ScheduledStep[];  // 構造化された作業予定
+  updatedAt: string;
+}
+```
+
 ---
 
 ## 7. ヘルスチェック・モデル検証
@@ -826,17 +951,17 @@ MCPサーバー起動時に以下の順序で **自動実行** する。MCP ツ�
 ```mermaid
 sequenceDiagram
     participant Server as MCPサーバー
-    participant CLI as Cursor CLI
+    participant CLI as Provider CLI (agent / claude)
     participant UI as ダッシュボードUI
 
     Server->>UI: 起動通知（ヘルスチェック開始）
-    Server->>CLI: agent models（利用可能モデル一覧取得）
+    Server->>CLI: Provider ごとにモデル一覧取得（cursor: agent models / claude: 静的一覧）
     CLI-->>Server: モデル一覧
     Server->>UI: モデル検証結果を送信
 
     loop 各職種（モデル検証通過済み）
         Server->>UI: 職種チェック開始通知
-        Server->>CLI: agent -p -m {model} "{healthCheckPrompt}"
+        Server->>CLI: {provider の CLI} -p --model {model} "{healthCheckPrompt}"
         CLI-->>Server: レスポンス
         Server->>UI: 職種チェック結果通知
     end
@@ -846,8 +971,8 @@ sequenceDiagram
 
 ### 7.2 モデル検証
 
-1. MCPサーバー起動時に `agent models` コマンドを実行し、Cursor で利用可能なモデル一覧を取得する
-2. 各職種に設定されたモデルが一覧に存在するか照合する
+1. MCPサーバー起動時に、職種で使用されている Provider ごとにモデル一覧を取得する（Cursor: `agent models` コマンド / Claude: 静的なエイリアス一覧）
+2. 各職種に設定されたモデルを、その職種の Provider のモデル一覧（Claude はエイリアス / `claude-` 完全 ID のパターン）と照合する
 3. 利用不可のモデルが設定されている場合:
    - コンソールに警告ログを出力する
    - ダッシュボード UI に該当職種のエラーを表示する（赤色バッジ + 利用可能モデルへの変更を促す UI）
@@ -855,9 +980,12 @@ sequenceDiagram
 
 ### 7.3 ヘルスチェック
 
-1. モデル検証を通過した職種に対して、`healthCheckPrompt` を Cursor CLI で実行する
+1. モデル検証を通過した職種に対して、`healthCheckPrompt` を職種の Provider の CLI で実行する
    ```bash
-   agent -p -m "{role.model}" "{role.healthCheckPrompt}"
+   # cursor
+   agent -p --trust --model "{role.model}" "{role.healthCheckPrompt}"
+   # claude
+   claude -p "{role.healthCheckPrompt}" --model "{role.model}"
    ```
 2. 正常にレスポンスが返ればチェック通過とする
 3. 結果をコンソールと UI にリアルタイムでレポートする（成功/失敗、応答時間）
@@ -869,6 +997,8 @@ sequenceDiagram
 interface HealthCheckResult {
   /** チェック対象の職種 ID */
   roleId: string;
+  /** 職種の Provider */
+  provider: "cursor" | "claude";
   /** モデル検証結果 */
   modelValidation: {
     status: "valid" | "invalid";
@@ -1013,7 +1143,7 @@ interface HealthCheckResult {
 
 | イベント名 | 説明 | タイミング |
 |---|---|---|
-| `server:startup` | サーバー起動通知（`availableModels` を含む） | MCPサーバー起動時 |
+| `server:startup` | サーバー起動通知（`availableModels` と Provider 別の `availableModelsByProvider` を含む） | MCPサーバー起動時 |
 | `healthcheck:model_validation` | モデル検証結果 | モデル検証完了時 |
 | `healthcheck:role_start` | 職種チェック開始 | 各職種のヘルスチェック開始時 |
 | `healthcheck:role_complete` | 職種チェック完了 | 各職種のヘルスチェック完了時 |
@@ -1051,6 +1181,11 @@ interface HealthCheckResult {
 dashboard:
   port: 9696          # HTTP/WebSocket ポート（デフォルト: 9696「くろくろ」）
 
+# Provider 設定（省略可）
+providers:
+  claude:
+    permissionMode: bypassPermissions  # Claude Code の --permission-mode（デフォルト: bypassPermissions）
+
 # Agent 実行設定
 agent:
   # defaultTimeout_ms: 300000  # デフォルトタイムアウト（省略時: タイムアウトなし）
@@ -1065,7 +1200,8 @@ roles:
   - id: impl-code
     name: コード実装者
     description: コードの実装・修正を行う。新機能の追加、バグ修正、リファクタリングなど、ファイルの編集を伴うタスクに使用する
-    model: claude-4-sonnet
+    provider: claude          # cursor | claude（省略時: cursor）
+    model: sonnet             # claude: エイリアス or claude-* の完全 ID
     systemPrompt: |
       あなたはコード実装の専門家です。
       与えられた仕様や指示に基づき、高品質なコードを実装してください。
@@ -1098,7 +1234,8 @@ roles:
   - id: research
     name: 調査員
     description: 調査・情報収集を行う。技術選定、ベストプラクティスの調査、コードベースの分析などに使用する。ファイルの編集は行わない
-    model: composer-1.5
+    provider: cursor
+    model: composer-1.5       # cursor: `agent models` の ID
     systemPrompt: |
       あなたは調査・情報収集の専門家です。
       与えられたテーマやトピックについて、Web検索やローカルファイルの検索を駆使して
@@ -1128,9 +1265,9 @@ roles:
 
 ---
 
-## 10. Cursor MCP 連携設定
+## 10. MCP 連携設定（Cursor / Claude Code）
 
-### 10.1 mcp.json 設定例
+### 10.1 Cursor: mcp.json 設定例
 
 プロジェクトの `.cursor/mcp.json` に以下を追加する:
 
@@ -1148,11 +1285,22 @@ roles:
 }
 ```
 
-### 10.2 環境変数
+### 10.2 Claude Code: MCP 接続
+
+メイン Agent として Claude Code から利用する場合は、HTTP トランスポートで接続する:
+
+```bash
+claude mcp add --transport http kuromajutsu http://localhost:9696/mcp
+```
+
+なお、サブ Agent として起動される Claude には `--mcp-config` で自動的に接続されるため、事前設定は不要。
+
+### 10.3 環境変数
 
 | 変数名 | 必須 | 説明 |
 |---|---|---|
-| `CURSOR_API_KEY` | はい | Cursor CLI 認証用 API キー |
+| `CURSOR_API_KEY` | `cursor` Provider 使用時 | Cursor CLI 認証用 API キー |
+| `ANTHROPIC_API_KEY` | いいえ | `claude` Provider の認証（未設定時は Claude Code のログイン情報を使用） |
 | `KUROMAJUTSU_PORT` | いいえ | ダッシュボードポート（デフォルト: `9696`） |
 | `KUROMAJUTSU_CONFIG` | いいえ | 設定ファイルパス（デフォルト: `./kuromajutsu.config.yaml`） |
 | `KUROMAJUTSU_LOG_LEVEL` | いいえ | ログレベル（デフォルト: `info`） |

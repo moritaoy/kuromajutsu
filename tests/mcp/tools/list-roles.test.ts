@@ -43,7 +43,7 @@ describe("list_roles", () => {
     expect(data.roles[1].id).toBe("code-review");
   });
 
-  it("各職種の id, name, description, model のみを含む", () => {
+  it("各職種の id, name, description, provider, model のみを含む（provider 省略時は cursor）", () => {
     const config = createTestConfig();
     const result = handleListRoles(config);
 
@@ -53,6 +53,7 @@ describe("list_roles", () => {
       id: "impl-code",
       name: "コード実装者",
       description: "コードの実装・修正を行う",
+      provider: "cursor",
       model: "claude-4-sonnet",
     });
   });

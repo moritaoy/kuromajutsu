@@ -11,6 +11,7 @@
 
 import { EventEmitter } from "node:events";
 import type {
+  AgentProviderId,
   AgentState,
   AgentStatus,
   AgentResult,
@@ -28,6 +29,7 @@ import type {
   ProgressLedger,
 } from "../types/index.js";
 import { AgentExecutor } from "./executor.js";
+import { resolveProviderId } from "./providers/index.js";
 import { buildToolPromptBlock } from "./tools.js";
 
 // --------------------------------------------------
@@ -74,6 +76,8 @@ export class AgentManager extends EventEmitter {
 
   /** 利用可能モデル一覧（ヘルスチェック時に取得） */
   private availableModels: string[];
+  /** Provider 別の利用可能モデル一覧 */
+  private availableModelsByProvider: Record<AgentProviderId, string[]>;
 
   /** Agent 完了待ちの Promise resolver: agentId → resolve[] */
   private waitResolvers: Map<string, Array<() => void>>;
@@ -96,6 +100,7 @@ export class AgentManager extends EventEmitter {
     this.agents = new Map();
     this.healthCheckResults = new Map();
     this.availableModels = [];
+    this.availableModelsByProvider = { cursor: [], claude: [] };
     this.waitResolvers = new Map();
     this.sequentialPlans = new Map();
     this.magenticConfigs = new Map();
@@ -207,7 +212,11 @@ export class AgentManager extends EventEmitter {
       this.ledgers.set(groupId, ledger);
     }
 
-    ledger.taskLedger = { ...data, updatedAt: new Date().toISOString() };
+    ledger.taskLedger = {
+      ...data,
+      scheduledSteps: data.scheduledSteps ?? ledger.taskLedger?.scheduledSteps,
+      updatedAt: new Date().toISOString(),
+    };
     this.emit("group:ledger_updated", ledger);
   }
 
@@ -288,6 +297,7 @@ export class AgentManager extends EventEmitter {
       groupId,
       role: role.id,
       model: role.model,
+      provider: resolveProviderId(role),
       status: "queued",
       startedAt: now,
       elapsed_ms: 0,
@@ -319,7 +329,7 @@ export class AgentManager extends EventEmitter {
       const pid = this.executor.execute(
         agentId,
         {
-          model: role.model,
+          ...this.buildExecutorProviderOptions(role),
           prompt: fullPrompt,
           workingDirectory: options?.workingDirectory,
           timeout_ms,
@@ -439,6 +449,7 @@ export class AgentManager extends EventEmitter {
           groupId,
           role: roleDef.id,
           model: roleDef.model,
+          provider: resolveProviderId(roleDef),
           status: "queued",
           startedAt: now,
           elapsed_ms: 0,
@@ -576,7 +587,18 @@ export class AgentManager extends EventEmitter {
       "   - facts.toInvestigate: 調査が必要な事項",
       "   - facts.toDerive: 導出すべき事項",
       "   - facts.assumptions: 推測・仮定",
-      "   - plan: 実行計画のステップ一覧",
+      "   - plan: 実行計画のステップ一覧（高レベル）",
+      "   - scheduledSteps（推奨）: 構造化された作業予定。各ステップに stepId, role, description, status, dependsOn を指定する。",
+      "     例: [",
+      "       { stepId: \"s1\", role: \"explore\", description: \"コードベース調査\", status: \"pending\" },",
+      "       { stepId: \"s2\", role: \"impl-code\", description: \"実装\", status: \"pending\", dependsOn: [\"s1\"] },",
+      "       { stepId: \"s3\", role: \"impl-test\", description: \"テスト作成\", status: \"pending\", dependsOn: [\"s1\"] }",
+      "     ]",
+      "",
+      "   scheduledSteps を指定した場合、レスポンスに nextRunnableSteps（依存が解決済みで即時実行可能なステップ）が返される。",
+      "   - nextRunnableSteps に **複数ステップ** がある場合: create_group + run_agents で **並列実行** する",
+      "   - nextRunnableSteps に **1ステップ** の場合: 単独で実行する",
+      "   - nextRunnableSteps が **空** の場合: 全ステップ完了済み",
       "",
       "2. **各反復の開始時**: `update_ledger(type: \"progress\")` を呼び出し、以下の 5 項目を判定・記録する:",
       "   - isRequestSatisfied: { reason: \"判定理由\", answer: true/false } — リクエストは満たされたか",
@@ -585,8 +607,14 @@ export class AgentManager extends EventEmitter {
       "   - nextAction: { reason: \"判定理由\", answer: \"次のアクションの説明\" } — 次に何をするか",
       "   - instruction: { reason: \"判定理由\", answer: \"サブ Agent への具体的指示\" } — サブ Agent にどう指示するか",
       "   - iteration: 現在の反復番号",
+      "   - scheduledSteps（重要）: 進捗更新と同時に、各ステップの最新ステータスを反映した scheduledSteps を必ず含めること。",
+      "     サブ Agent を起動したステップは \"in_progress\" に、完了したステップは \"completed\" に更新する。",
+      "     これによりダッシュボード上で作業予定のステータスがリアルタイムに可視化される。",
       "",
-      "3. **リプラン時**: 計画を見直した場合は `update_ledger(type: \"task\")` で計画を更新する。",
+      "3. **リプラン時**: `update_ledger(type: \"task\")` で plan と scheduledSteps を更新する。",
+      "   - 完了済みステップの status を \"completed\" に、不要になったステップを \"skipped\" に変更する",
+      "   - 新たなステップの追加、dependsOn の変更、順序変更も自由に行える",
+      "   - レスポンスの nextRunnableSteps で次に実行すべきステップを確認する",
       "",
       "---",
     ].join("\n");
@@ -849,6 +877,7 @@ export class AgentManager extends EventEmitter {
       createdFiles: mergedCreatedFiles,
       duration_ms: agent.elapsed_ms,
       model: agent.model,
+      provider: agent.provider,
       role: agent.role,
       toolCallCount: agent.toolCallCount,
       errorMessage: reportData.errorMessage,
@@ -904,6 +933,19 @@ export class AgentManager extends EventEmitter {
     this.availableModels = [...models];
   }
 
+  /** Provider 別の利用可能モデル一覧を設定する */
+  setAvailableModelsByProvider(models: Record<AgentProviderId, string[]>): void {
+    this.availableModelsByProvider = {
+      cursor: [...models.cursor],
+      claude: [...models.claude],
+    };
+  }
+
+  /** Provider 別の利用可能モデル一覧を取得する */
+  getAvailableModelsByProvider(): Record<AgentProviderId, string[]> {
+    return this.availableModelsByProvider;
+  }
+
   /** 利用可能モデル一覧を取得する */
   getAvailableModels(): string[] {
     return this.availableModels;
@@ -912,6 +954,21 @@ export class AgentManager extends EventEmitter {
   // ==================================================
   // 内部メソッド
   // ==================================================
+
+  /** AgentExecutor に渡す Provider 関連オプションを組み立てる */
+  private buildExecutorProviderOptions(role: RoleDefinition): {
+    provider: AgentProviderId;
+    model: string;
+    mcpUrl: string;
+    permissionMode?: string;
+  } {
+    return {
+      provider: resolveProviderId(role),
+      model: role.model,
+      mcpUrl: `http://localhost:${this.config.dashboard.port}/mcp`,
+      permissionMode: this.config.providers?.claude?.permissionMode,
+    };
+  }
 
   /**
    * 削除済みグループの Agent を maxHistory 件に制限する。
@@ -1076,7 +1133,7 @@ export class AgentManager extends EventEmitter {
       const pid = this.executor.execute(
         agentId,
         {
-          model: roleDef.model,
+          ...this.buildExecutorProviderOptions(roleDef),
           prompt: fullPrompt,
           workingDirectory: agent.workingDirectory,
           timeout_ms,
@@ -1119,6 +1176,7 @@ export class AgentManager extends EventEmitter {
           createdFiles: agent.createdFiles,
           duration_ms: agent.elapsed_ms,
           model: agent.model,
+          provider: agent.provider,
           role: agent.role,
           toolCallCount: agent.toolCallCount,
           timestamp: new Date().toISOString(),

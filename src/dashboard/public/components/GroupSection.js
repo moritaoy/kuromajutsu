@@ -41,8 +41,80 @@ function LedgerPanel({ ledger }) {
   );
 }
 
+function renderScheduledSteps(scheduledSteps) {
+  const layerMap = new Map();
+  for (const step of scheduledSteps) {
+    layerMap.set(step.stepId, -1);
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const step of scheduledSteps) {
+      const deps = step.dependsOn || [];
+      if (deps.length === 0) {
+        if (layerMap.get(step.stepId) !== 0) {
+          layerMap.set(step.stepId, 0);
+          changed = true;
+        }
+      } else {
+        const depLayers = deps.map((d) => layerMap.get(d)).filter((l) => l >= 0);
+        if (depLayers.length === deps.length) {
+          const maxLayer = Math.max(...depLayers);
+          const newLayer = maxLayer + 1;
+          if (layerMap.get(step.stepId) !== newLayer) {
+            layerMap.set(step.stepId, newLayer);
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  const layerToSteps = new Map();
+  for (const step of scheduledSteps) {
+    const layer = layerMap.get(step.stepId);
+    if (layer < 0) continue;
+    if (!layerToSteps.has(layer)) layerToSteps.set(layer, []);
+    layerToSteps.get(layer).push(step);
+  }
+  const maxLayer = Math.max(...layerToSteps.keys(), -1);
+  const layers = [];
+  for (let i = 0; i <= maxLayer; i++) {
+    layers.push(layerToSteps.get(i) || []);
+  }
+
+  return h("div", { className: "scheduled-steps" },
+    h("div", { className: "fact-card-label" }, "作業予定"),
+    layers.flatMap((layer, layerIdx) =>
+      [
+        layerIdx > 0 &&
+          h("div", { className: "pipeline-connector", key: `conn-${layerIdx}` },
+            h("div", { className: "pipeline-connector-line" }),
+          ),
+        h("div", { className: "pipeline-layer", key: `layer-${layerIdx}` },
+          layer.map((step) =>
+            h("div", {
+              className: `step-card step-card--${step.status}`,
+              key: step.stepId,
+            },
+              h("div", { className: "step-card-header" },
+                h("span", { className: "step-role-badge" }, step.role),
+                h("span", { className: `step-status-badge step-status--${step.status}` },
+                  step.status === "completed" ? "\u2713" :
+                  step.status === "in_progress" ? "\u25B6" :
+                  step.status === "skipped" ? "\u2212" : "\u25CB",
+                ),
+              ),
+              h("div", { className: "step-description" }, step.description),
+            ),
+          ),
+        ),
+      ].filter(Boolean),
+    ),
+  );
+}
+
 function renderTaskLedger(ledger) {
-  const { facts, plan, updatedAt } = ledger;
+  const { facts, plan, scheduledSteps, updatedAt } = ledger;
   const factCategories = [
     { key: "given", label: "与えられた事実", items: facts.given },
     { key: "toInvestigate", label: "調査すべき事項", items: facts.toInvestigate },
@@ -68,6 +140,7 @@ function renderTaskLedger(ledger) {
         plan.map((step, i) => h("li", { key: i }, step)),
       ),
     ),
+    scheduledSteps && scheduledSteps.length > 0 && renderScheduledSteps(scheduledSteps),
   );
 }
 

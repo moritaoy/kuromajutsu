@@ -81,6 +81,61 @@ describe("AgentExecutor", () => {
     );
   });
 
+  it("provider: claude のとき claude CLI を起動し --mcp-config / --permission-mode を渡す", async () => {
+    const { spawn } = await import("node:child_process");
+    vi.mocked(spawn).mockClear();
+
+    executor.execute("agent-claude-1", {
+      provider: "claude",
+      model: "sonnet",
+      prompt: "Hello claude",
+      mcpUrl: "http://localhost:9696/mcp",
+      permissionMode: "acceptEdits",
+    }, { onStreamEvent: vi.fn(), onExit: vi.fn(), onError: vi.fn() });
+
+    const [command, args, opts] = vi.mocked(spawn).mock.calls[0] as unknown as [
+      string,
+      string[],
+      { stdio: unknown },
+    ];
+    expect(command).toBe("claude");
+    expect(args.slice(0, 2)).toEqual(["-p", "Hello claude"]);
+    expect(args).toEqual(expect.arrayContaining(["--model", "sonnet", "--verbose", "--permission-mode", "acceptEdits"]));
+    expect(args).toContain("--mcp-config");
+    expect(opts.stdio).toEqual(["ignore", "pipe", "pipe"]);
+  });
+
+  it("provider: claude の stream-json を共通イベントに正規化して onStreamEvent に渡す", async () => {
+    vi.useRealTimers();
+    const onStreamEvent = vi.fn();
+
+    executor.execute("agent-claude-2", {
+      provider: "claude",
+      model: "sonnet",
+      prompt: "x",
+    }, { onStreamEvent, onExit: vi.fn(), onError: vi.fn() });
+
+    const lines = [
+      { type: "system", subtype: "init", model: "claude-sonnet-4-5" },
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: "/a.ts" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } },
+      { type: "assistant", message: { content: [{ type: "text", text: "done" }] } },
+      { type: "result", subtype: "success", is_error: false, duration_ms: 42 },
+    ];
+    for (const l of lines) mockChild.stdout.write(JSON.stringify(l) + "\n");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const seen = onStreamEvent.mock.calls.map(([e]) => `${e.type}:${e.subtype ?? ""}`);
+    expect(seen).toEqual([
+      "system:init",
+      "tool_call:started",
+      "tool_call:completed",
+      "assistant:",
+      "result:success",
+    ]);
+    vi.useFakeTimers();
+  });
+
   it("PID を返す", () => {
     const callbacks = {
       onStreamEvent: vi.fn(),

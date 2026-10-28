@@ -9,10 +9,11 @@
 
 | 用語 | 英語表記 | 定義 |
 |------|---------|------|
-| エージェント | Agent | Cursor CLI ヘッドレスモードで起動される独立した AI 実行単位。子プロセスとして動作する |
-| メインエージェント | Main Agent | Cursor IDE 上でユーザーと直接対話する Agent。kuromajutsu の MCP ツールを呼び出して複数のサブ Agent を管理する |
+| エージェント | Agent | Provider の CLI（Cursor CLI / Claude Code CLI）のヘッドレスモードで起動される独立した AI 実行単位。子プロセスとして動作する |
+| メインエージェント | Main Agent | Cursor IDE や Claude Code 上でユーザーと直接対話する Agent。kuromajutsu の MCP ツールを呼び出して複数のサブ Agent を管理する |
 | サブエージェント | Sub Agent | メインエージェントから `run_agents` で起動される Agent。1台以上の Agent を一括起動し、特定の職種に基づいて動作する |
-| 職種 / ロール | Role | Agent に割り当てる役割の定義。システムプロンプト、モデル、ツールセット等で構成される |
+| 職種 / ロール | Role | Agent に割り当てる役割の定義。システムプロンプト、Provider、モデル、ツールセット等で構成される。1 職種は 1 Provider・1 モデルを持つ |
+| Provider | Provider | Agent を実際に実行する基盤。`cursor`（Cursor CLI `agent`）と `claude`（Claude Code CLI `claude`）に対応する。職種ごとに指定し、複数 Provider のモデルを混在させて並列実行できる。省略時は `cursor` |
 | グループ | Group | 関連する Agent の実行をまとめる論理的な単位。`create_group` で作成し、Agent 実行時に `groupId` を指定して紐付ける |
 | Magentic パターン | Magentic Pattern | Microsoft Research が提唱するマルチエージェントオーケストレーションパターン。Orchestrator Agent が計画→委任→評価→リプランのループでタスクを自律的に遂行する |
 | オーケストレーター | Orchestrator | Magentic パターンの中核 Agent。タスクの分析・計画立案・サブ Agent への委任・結果評価・リプランニングを自律的に行う。`orchestrator` ロール（opus-4.6-thinking）で実行される |
@@ -30,8 +31,10 @@
 
 | 用語 | 英語表記 | 定義 |
 |------|---------|------|
-| ヘッドレスモード | Headless Mode | Cursor CLI の非対話モード（`agent -p --force`）。GUI なしで Agent を実行する |
-| stream-json | Stream JSON | Cursor CLI の `--output-format stream-json` で出力される NDJSON 形式のイベントストリーム |
+| ヘッドレスモード | Headless Mode | CLI の非対話モード（Cursor: `agent -p --force` / Claude: `claude -p`）。GUI なしで Agent を実行する |
+| stream-json | Stream JSON | 各 Provider CLI の `--output-format stream-json` で出力される NDJSON 形式のイベントストリーム。Provider ごとに形式が異なる |
+| ノーマライザ | Normalizer | Provider 固有の stream-json イベントを共通イベント形式（Cursor 形式）に変換する処理。Claude Provider ではツール呼び出し（`tool_use` / `tool_result`）を `tool_call` イベントに変換する |
+| パーミッションモード | Permission Mode | Claude Code CLI の `--permission-mode`。無人実行のためデフォルトは `bypassPermissions`。`providers.claude.permissionMode` で変更できる |
 | NDJSON | Newline Delimited JSON | 改行区切りの JSON 形式。各行が1つの JSON オブジェクトを表す |
 | Agent ID | Agent ID | Agent の一意識別子。`{role}-{timestamp}-{random4hex}` 形式 |
 | Group ID | Group ID | グループの一意識別子。`grp-{unixTimestamp}-{random4hex}` 形式 |
@@ -49,7 +52,7 @@
 |------|---------|------|
 | ダッシュボード | Dashboard | ブラウザで表示する管理 UI。Agent の状態をリアルタイムで監視する。ポート 9696 で配信 |
 | ヘルスチェック | Health Check | MCPサーバー起動時に各職種が正しく動作するか検証する自動チェック処理 |
-| モデル検証 | Model Validation | 各職種に設定されたモデルが Cursor で利用可能かを確認する処理 |
+| モデル検証 | Model Validation | 各職種に設定されたモデルが、その職種の Provider で利用可能かを確認する処理（Cursor: `agent models` と照合 / Claude: エイリアスまたは `claude-*` ID のパターン照合） |
 
 ## 開発・運用
 

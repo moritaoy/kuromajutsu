@@ -309,4 +309,47 @@ describe("run_magentic", () => {
     expect(executorPrompt).toContain("isRequestSatisfied");
     expect(executorPrompt).toContain("isProgressBeingMade");
   });
+
+  it("Orchestrator プロンプトに scheduledSteps の説明が含まれること", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockExecute = (manager as any).executor.execute as ReturnType<typeof vi.fn>;
+
+    const result = handleRunMagentic(config, manager, {
+      description: "テスト",
+      task: "タスク",
+      completionCriteria: "条件",
+      scope: "src/",
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    const execCall = mockExecute.mock.calls.find(
+      (call: [string, unknown]) => call[0] === data.orchestratorAgentId,
+    );
+    expect(execCall).toBeDefined();
+    const executorPrompt = (execCall![1] as { prompt: string }).prompt;
+
+    expect(executorPrompt).toContain("scheduledSteps");
+  });
+
+  it("Orchestrator プロンプトに nextRunnableSteps の使い方が含まれること", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockExecute = (manager as any).executor.execute as ReturnType<typeof vi.fn>;
+
+    const result = handleRunMagentic(config, manager, {
+      description: "テスト",
+      task: "タスク",
+      completionCriteria: "条件",
+      scope: "src/",
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    const execCall = mockExecute.mock.calls.find(
+      (call: [string, unknown]) => call[0] === data.orchestratorAgentId,
+    );
+    expect(execCall).toBeDefined();
+    const executorPrompt = (execCall![1] as { prompt: string }).prompt;
+
+    expect(executorPrompt).toContain("nextRunnableSteps");
+    expect(executorPrompt).toContain("並列実行");
+  });
 });

@@ -5,7 +5,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { AppConfig } from "../types/index.js";
+import { DEFAULT_PROVIDER_ID, isAgentProviderId } from "../agent/providers/index.js";
+import type { AppConfig, RoleDefinition } from "../types/index.js";
 
 /** ビルトインデフォルト値 */
 const DEFAULTS: AppConfig = {
@@ -58,8 +59,11 @@ export function loadConfig(configPath?: string): AppConfig {
       ...DEFAULTS.log,
       ...fileConfig.log,
     },
-    roles: fileConfig.roles ?? DEFAULTS.roles,
+    roles: normalizeRoles(fileConfig.roles ?? DEFAULTS.roles),
   };
+  if (fileConfig.providers) {
+    config.providers = fileConfig.providers;
+  }
 
   // 環境変数によるオーバーライド
   if (process.env["KUROMAJUTSU_PORT"]) {
@@ -70,4 +74,21 @@ export function loadConfig(configPath?: string): AppConfig {
   }
 
   return config;
+}
+
+/**
+ * 職種定義を正規化する。
+ * - provider 省略時は cursor（後方互換）
+ * - 未知の provider はエラー
+ */
+function normalizeRoles(roles: RoleDefinition[]): RoleDefinition[] {
+  return roles.map((role) => {
+    const provider = role.provider ?? DEFAULT_PROVIDER_ID;
+    if (!isAgentProviderId(provider)) {
+      throw new Error(
+        `[config] 職種 '${role.id}' の provider '${String(provider)}' は未対応です（cursor | claude）`,
+      );
+    }
+    return { ...role, provider };
+  });
 }

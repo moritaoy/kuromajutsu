@@ -1153,6 +1153,91 @@ describe("AgentManager — buildFullPrompt", () => {
 });
 
 // ==================================================
+// マルチ Provider テスト
+// ==================================================
+
+describe("AgentManager — マルチ Provider", () => {
+  function mixedConfig(): AppConfig {
+    const base = createTestConfig();
+    base.roles = [
+      { ...base.roles[0], id: "cursor-role", provider: "cursor", model: "composer-2.5-fast" },
+      { ...base.roles[1], id: "claude-role", provider: "claude", model: "sonnet" },
+      { ...base.roles[1], id: "legacy-role" }, // provider 省略
+    ];
+    base.providers = { claude: { permissionMode: "acceptEdits" } };
+    return base;
+  }
+
+  it("AgentState に provider が記録され、省略時は cursor になる", () => {
+    const manager = new AgentManager(mixedConfig());
+    const group = manager.createGroup("mix");
+    const cfg = mixedConfig();
+
+    const a = manager.startAgent(group.id, cfg.roles[0], "p");
+    const b = manager.startAgent(group.id, cfg.roles[1], "p");
+    const c = manager.startAgent(group.id, cfg.roles[2], "p");
+
+    expect([a.provider, b.provider, c.provider]).toEqual(["cursor", "claude", "cursor"]);
+  });
+
+  it("executor に provider / mcpUrl / permissionMode を渡す", () => {
+    const cfg = mixedConfig();
+    const manager = new AgentManager(cfg);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockExecute = (manager as any).executor.execute as ReturnType<typeof vi.fn>;
+    const group = manager.createGroup("mix");
+
+    manager.startAgent(group.id, cfg.roles[1], "p");
+    const options = mockExecute.mock.calls[mockExecute.mock.calls.length - 1][1];
+    expect(options.provider).toBe("claude");
+    expect(options.model).toBe("sonnet");
+    expect(options.mcpUrl).toBe("http://localhost:9696/mcp");
+    expect(options.permissionMode).toBe("acceptEdits");
+
+    manager.startAgent(group.id, cfg.roles[0], "p");
+    const options2 = mockExecute.mock.calls[mockExecute.mock.calls.length - 1][1];
+    expect(options2.provider).toBe("cursor");
+  });
+
+  it("Sequential 投入でも provider が AgentState と executor に反映される", () => {
+    const cfg = mixedConfig();
+    const manager = new AgentManager(cfg);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockExecute = (manager as any).executor.execute as ReturnType<typeof vi.fn>;
+    const group = manager.createGroup("seq", "sequential");
+
+    const { agents } = manager.submitSequential(group.id, [
+      { tasks: [{ role: "claude-role", prompt: "stage0" }] },
+      { tasks: [{ role: "cursor-role", prompt: "stage1" }] },
+    ]);
+    expect(agents.map((a) => a.provider)).toEqual(["claude", "cursor"]);
+    expect(mockExecute.mock.calls[0][1].provider).toBe("claude");
+  });
+
+  it("result の AgentResult に provider が含まれる", () => {
+    const cfg = mixedConfig();
+    const manager = new AgentManager(cfg);
+    const group = manager.createGroup("mix");
+    const agent = manager.startAgent(group.id, cfg.roles[1], "p");
+    manager.updateAgentState(agent.agentId, { status: "running" });
+
+    const result = manager.reportResult(agent.agentId, {
+      status: "success",
+      summary: "s",
+      response: "r",
+    });
+    expect(result.provider).toBe("claude");
+  });
+
+  it("setAvailableModelsByProvider / getAvailableModelsByProvider で Provider 別一覧を保持する", () => {
+    const manager = new AgentManager(mixedConfig());
+    expect(manager.getAvailableModelsByProvider()).toEqual({ cursor: [], claude: [] });
+    manager.setAvailableModelsByProvider({ cursor: ["a"], claude: ["sonnet"] });
+    expect(manager.getAvailableModelsByProvider()).toEqual({ cursor: ["a"], claude: ["sonnet"] });
+  });
+});
+
+// ==================================================
 // Magentic グループ管理テスト
 // ==================================================
 

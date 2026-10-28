@@ -5,7 +5,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { AgentManager } from "../../../src/agent/manager.js";
 import { handleUpdateLedger } from "../../../src/mcp/tools/update-ledger.js";
-import type { AppConfig, MagenticConfig, MagenticLedger } from "../../../src/types/index.js";
+import type {
+  AppConfig,
+  MagenticConfig,
+  MagenticLedger,
+  ScheduledStep,
+} from "../../../src/types/index.js";
 
 // AgentExecutor をモック化
 vi.mock("../../../src/agent/executor.js", () => {
@@ -197,5 +202,436 @@ describe("update_ledger", () => {
     const ledger = manager.getLedger(groupId);
     expect(ledger!.progressLedger!.iteration).toBe(3);
     expect(ledger!.progressHistory).toHaveLength(2);
+  });
+
+  it("scheduledSteps 付きの task 台帳更新が成功すること", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      {
+        stepId: "s1",
+        role: "impl-code",
+        description: "ステップ1",
+        status: "pending",
+      },
+    ];
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画"],
+      scheduledSteps,
+    });
+
+    expect(result).not.toHaveProperty("isError");
+    const ledger = manager.getLedger(groupId);
+    expect(ledger?.taskLedger?.scheduledSteps).toEqual(scheduledSteps);
+  });
+
+  it("scheduledSteps 省略時はレスポンスに nextRunnableSteps が含まれないこと", () => {
+    const groupId = createMagenticGroup(manager);
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画"],
+    });
+
+    expect(result).not.toHaveProperty("isError");
+    const data = JSON.parse(result.content[0].text);
+    expect(data).not.toHaveProperty("nextRunnableSteps");
+  });
+
+  it("nextRunnableSteps: 依存なしステップが即時 runnable", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      {
+        stepId: "s1",
+        role: "impl-code",
+        description: "依存なし",
+        status: "pending",
+      },
+    ];
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: [],
+      scheduledSteps,
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.nextRunnableSteps).toEqual([
+      { stepId: "s1", role: "impl-code", description: "依存なし" },
+    ]);
+  });
+
+  it("nextRunnableSteps: 依存先が completed/skipped のステップが runnable", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      { stepId: "s1", role: "impl-code", description: "s1", status: "completed" },
+      {
+        stepId: "s2",
+        role: "impl-code",
+        description: "s2",
+        status: "pending",
+        dependsOn: ["s1"],
+      },
+    ];
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: [],
+      scheduledSteps,
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.nextRunnableSteps).toEqual([
+      { stepId: "s2", role: "impl-code", description: "s2" },
+    ]);
+  });
+
+  it("nextRunnableSteps: 依存先が pending のステップは runnable でないこと", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      { stepId: "s1", role: "impl-code", description: "s1", status: "pending" },
+      {
+        stepId: "s2",
+        role: "impl-code",
+        description: "s2",
+        status: "pending",
+        dependsOn: ["s1"],
+      },
+    ];
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: [],
+      scheduledSteps,
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.nextRunnableSteps).toEqual([
+      { stepId: "s1", role: "impl-code", description: "s1" },
+    ]);
+  });
+
+  it("nextRunnableSteps: 全ステップ completed 時は空配列", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      { stepId: "s1", role: "impl-code", description: "s1", status: "completed" },
+      { stepId: "s2", role: "impl-code", description: "s2", status: "completed" },
+    ];
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: [],
+      scheduledSteps,
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.nextRunnableSteps).toEqual([]);
+  });
+
+  it("nextRunnableSteps: 並列実行可能なステップが複数返ること", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      { stepId: "s1", role: "impl-code", description: "s1", status: "completed" },
+      {
+        stepId: "s2",
+        role: "impl-code",
+        description: "s2",
+        status: "pending",
+        dependsOn: ["s1"],
+      },
+      {
+        stepId: "s3",
+        role: "impl-code",
+        description: "s3",
+        status: "pending",
+        dependsOn: ["s1"],
+      },
+    ];
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: [],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: [],
+      scheduledSteps,
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.nextRunnableSteps).toHaveLength(2);
+    expect(data.nextRunnableSteps).toContainEqual({
+      stepId: "s2",
+      role: "impl-code",
+      description: "s2",
+    });
+    expect(data.nextRunnableSteps).toContainEqual({
+      stepId: "s3",
+      role: "impl-code",
+      description: "s3",
+    });
+  });
+
+  it("scheduledSteps 省略の再更新で既存の scheduledSteps が保持されること", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      { stepId: "s1", role: "impl-code", description: "調査", status: "pending" },
+      {
+        stepId: "s2",
+        role: "impl-code",
+        description: "実装",
+        status: "pending",
+        dependsOn: ["s1"],
+      },
+    ];
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: ["初回"],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画1"],
+      scheduledSteps,
+    });
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: ["更新後"],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画2"],
+    });
+
+    const ledger = manager.getLedger(groupId);
+    expect(ledger!.taskLedger!.facts.given).toEqual(["更新後"]);
+    expect(ledger!.taskLedger!.plan).toEqual(["計画2"]);
+    expect(ledger!.taskLedger!.scheduledSteps).toEqual(scheduledSteps);
+  });
+
+  it("scheduledSteps 付きの連続更新でステータスが正しく反映されること", () => {
+    const groupId = createMagenticGroup(manager);
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: ["初回"],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画"],
+      scheduledSteps: [
+        { stepId: "s1", role: "impl-code", description: "調査", status: "pending" },
+        {
+          stepId: "s2",
+          role: "impl-code",
+          description: "実装",
+          status: "pending",
+          dependsOn: ["s1"],
+        },
+      ],
+    });
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: {
+        given: ["更新"],
+        toInvestigate: [],
+        toDerive: [],
+        assumptions: [],
+      },
+      plan: ["計画"],
+      scheduledSteps: [
+        { stepId: "s1", role: "impl-code", description: "調査", status: "completed" },
+        {
+          stepId: "s2",
+          role: "impl-code",
+          description: "実装",
+          status: "pending",
+          dependsOn: ["s1"],
+        },
+      ],
+    });
+
+    const ledger = manager.getLedger(groupId);
+    expect(ledger!.taskLedger!.scheduledSteps![0].status).toBe("completed");
+    expect(ledger!.taskLedger!.scheduledSteps![1].status).toBe("pending");
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.nextRunnableSteps).toEqual([
+      { stepId: "s2", role: "impl-code", description: "実装" },
+    ]);
+  });
+
+  it("type=progress + scheduledSteps 付きで taskLedger.scheduledSteps が更新されること", () => {
+    const groupId = createMagenticGroup(manager);
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: { given: ["初回"], toInvestigate: [], toDerive: [], assumptions: [] },
+      plan: ["計画"],
+      scheduledSteps: [
+        { stepId: "s1", role: "impl-code", description: "調査", status: "pending" },
+        { stepId: "s2", role: "impl-code", description: "実装", status: "pending", dependsOn: ["s1"] },
+      ],
+    });
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "progress",
+      isRequestSatisfied: { reason: "途中", answer: false },
+      isInLoop: { reason: "正常", answer: false },
+      isProgressBeingMade: { reason: "s1完了", answer: true },
+      nextAction: { reason: "次へ", answer: "s2 を起動" },
+      instruction: { reason: "実装", answer: "実装せよ" },
+      iteration: 1,
+      scheduledSteps: [
+        { stepId: "s1", role: "impl-code", description: "調査", status: "completed" },
+        { stepId: "s2", role: "impl-code", description: "実装", status: "in_progress", dependsOn: ["s1"] },
+      ],
+    });
+
+    const ledger = manager.getLedger(groupId);
+    expect(ledger!.taskLedger!.scheduledSteps![0].status).toBe("completed");
+    expect(ledger!.taskLedger!.scheduledSteps![1].status).toBe("in_progress");
+    expect(ledger!.taskLedger!.facts.given).toEqual(["初回"]);
+    expect(ledger!.taskLedger!.plan).toEqual(["計画"]);
+    expect(ledger!.progressLedger!.iteration).toBe(1);
+  });
+
+  it("type=progress + scheduledSteps 付きでレスポンスに nextRunnableSteps が含まれること", () => {
+    const groupId = createMagenticGroup(manager);
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: { given: [], toInvestigate: [], toDerive: [], assumptions: [] },
+      plan: ["計画"],
+      scheduledSteps: [
+        { stepId: "s1", role: "impl-code", description: "調査", status: "pending" },
+        { stepId: "s2", role: "impl-code", description: "実装", status: "pending", dependsOn: ["s1"] },
+      ],
+    });
+
+    const result = handleUpdateLedger(manager, {
+      groupId,
+      type: "progress",
+      isRequestSatisfied: { reason: "途中", answer: false },
+      isInLoop: { reason: "正常", answer: false },
+      isProgressBeingMade: { reason: "進捗", answer: true },
+      nextAction: { reason: "次", answer: "実行" },
+      instruction: { reason: "指示", answer: "実装" },
+      iteration: 1,
+      scheduledSteps: [
+        { stepId: "s1", role: "impl-code", description: "調査", status: "completed" },
+        { stepId: "s2", role: "impl-code", description: "実装", status: "pending", dependsOn: ["s1"] },
+      ],
+    });
+
+    const data = JSON.parse(result.content[0].text);
+    expect(data.type).toBe("progress");
+    expect(data.status).toBe("updated");
+    expect(data.nextRunnableSteps).toEqual([
+      { stepId: "s2", role: "impl-code", description: "実装" },
+    ]);
+  });
+
+  it("type=progress で scheduledSteps 省略時に既存の scheduledSteps が保持されること", () => {
+    const groupId = createMagenticGroup(manager);
+    const scheduledSteps: ScheduledStep[] = [
+      { stepId: "s1", role: "impl-code", description: "調査", status: "pending" },
+    ];
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "task",
+      facts: { given: ["初回"], toInvestigate: [], toDerive: [], assumptions: [] },
+      plan: ["計画"],
+      scheduledSteps,
+    });
+
+    handleUpdateLedger(manager, {
+      groupId,
+      type: "progress",
+      isRequestSatisfied: { reason: "途中", answer: false },
+      isInLoop: { reason: "正常", answer: false },
+      isProgressBeingMade: { reason: "進捗", answer: true },
+      nextAction: { reason: "次", answer: "実行" },
+      instruction: { reason: "指示", answer: "指示" },
+      iteration: 1,
+    });
+
+    const ledger = manager.getLedger(groupId);
+    expect(ledger!.taskLedger!.scheduledSteps).toEqual(scheduledSteps);
+    const data = JSON.parse(
+      handleUpdateLedger(manager, {
+        groupId,
+        type: "progress",
+        isRequestSatisfied: { reason: "途中", answer: false },
+        isInLoop: { reason: "正常", answer: false },
+        isProgressBeingMade: { reason: "進捗", answer: true },
+        nextAction: { reason: "次", answer: "実行" },
+        instruction: { reason: "指示", answer: "指示" },
+        iteration: 2,
+      }).content[0].text,
+    );
+    expect(data).not.toHaveProperty("nextRunnableSteps");
   });
 });

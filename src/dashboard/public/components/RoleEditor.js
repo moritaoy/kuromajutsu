@@ -8,6 +8,7 @@ import { createElement as h, useState } from "react";
  * @param {{ role: object, healthCheck: object|null, onSave: function, onRevalidate: function }} props
  */
 export function RoleEditor({ role, healthCheck, onSave, onRevalidate }) {
+  const [provider, setProvider] = useState(role.provider || "cursor");
   const [model, setModel] = useState(role.model);
   const [systemPrompt, setSystemPrompt] = useState(role.systemPrompt);
   const [healthCheckPrompt, setHealthCheckPrompt] = useState(role.healthCheckPrompt);
@@ -20,6 +21,7 @@ export function RoleEditor({ role, healthCheck, onSave, onRevalidate }) {
     onSave({
       id: role.id,
       name,
+      provider,
       model,
       systemPrompt,
       healthCheckPrompt,
@@ -54,6 +56,18 @@ export function RoleEditor({ role, healthCheck, onSave, onRevalidate }) {
       h("span", {
         className: `role-availability ${isAvailable ? "available" : "unavailable"}`,
       }, isAvailable ? "\u2705 利用可能" : "\u274C 利用不可"),
+    ),
+
+    // Provider
+    h("div", { className: "role-field" },
+      h("label", { className: "role-field-label" }, "Provider"),
+      h("select", {
+        value: provider,
+        onChange: (e) => markDirty(setProvider)(e.target.value),
+      },
+        h("option", { value: "cursor" }, "cursor"),
+        h("option", { value: "claude" }, "claude"),
+      ),
     ),
 
     // モデル

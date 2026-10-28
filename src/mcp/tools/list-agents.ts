@@ -34,6 +34,7 @@ export function handleListAgents(
     groupId: a.groupId,
     role: a.role,
     model: a.model,
+    provider: a.provider,
     status: a.status,
     startedAt: a.startedAt,
     elapsed_ms:

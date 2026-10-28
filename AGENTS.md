@@ -1,7 +1,7 @@
 # プロジェクト: kuromajutsu
 
 ## 概要
-Cursor Agent 並列実行管理システム。MCPサーバーとしてCursorと連携し、複数のサブAgentを並列に起動・管理する。
+Cursor / Claude マルチ Provider Agent 並列実行管理システム。MCPサーバーとしてCursor / Claude Codeと連携し、複数のサブAgentを並列に起動・管理する。職種ごとに Provider（cursor / claude）とモデルを指定できる。
 
 ## 仕様書【重要】
 - `docs/spec.md` : システム仕様書（SSOT）
@@ -26,7 +26,8 @@ project-root/
 │   │   ├── server.ts            # サーバー本体
 │   │   └── tools/               # 8つのMCPツール
 │   ├── agent/                   # Agent実行エンジン
-│   │   ├── executor.ts          # Cursor CLI 実行
+│   │   ├── executor.ts          # Provider CLI 実行
+│   │   ├── providers/           # Provider 抽象（cursor.ts / claude.ts / index.ts）
 │   │   ├── parser.ts            # stream-json パーサー
 │   │   └── manager.ts           # ライフサイクル管理
 │   ├── health/                  # ヘルスチェック
@@ -62,7 +63,7 @@ project-root/
 | コンポーネント | 説明 |
 |---------|------|
 | MCPサーバー | Cursorと stdio で通信、8つのツールを提供 |
-| Agent実行エンジン | Cursor CLI ヘッドレスモードで子プロセスを管理 |
+| Agent実行エンジン | Provider（Cursor CLI / Claude Code CLI）のヘッドレスモードで子プロセスを管理 |
 | ダッシュボードUI | ブラウザで Agent 状況をリアルタイム監視 |
 | ヘルスチェック | 起動時にモデル検証・職種動作確認を自動実行 |
 
@@ -104,7 +105,7 @@ npm run build       # Docker 経由で実行すること
 
 ### ⚠️ 開発実行はホストで実行
 
-Cursor CLI（`agent` コマンド）はホスト側にしか存在しないため、
+Cursor CLI（`agent`）/ Claude Code CLI（`claude`）はホスト側にしか存在しないため、
 ヘルスチェック・Agent 実行・モデル一覧取得を動かすにはホスト上で直接実行する。
 
 ```bash

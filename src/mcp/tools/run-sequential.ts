@@ -94,6 +94,7 @@ export function handleRunSequential(
               groupId: a.groupId,
               role: a.role,
               model: a.model,
+              provider: a.provider,
               status: a.status,
               stageIndex: a.stageIndex,
             })),

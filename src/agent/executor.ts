@@ -1,22 +1,26 @@
 // ============================================================
-// Agent 実行: Cursor CLI 実行・プロセス管理
+// Agent 実行: Provider CLI 実行・プロセス管理
 // ============================================================
 //
 // 責務:
-// - Cursor CLI をヘッドレスモード（agent -p --force）で子プロセスとして起動
-// - --output-format stream-json --stream-partial-output オプション付与
+// - Provider（Cursor CLI / Claude Code CLI）のヘッドレスコマンドを子プロセスとして起動
 // - 子プロセスの stdout を StreamJsonParser に渡してリアルタイム解析
+// - Provider ごとのノーマライザで共通イベント形式に変換してから通知
 // - タイムアウト処理（SIGTERM → 5秒後に SIGKILL）
 // - プロセスの exit code 管理
 
 import { spawn, type ChildProcess } from "node:child_process";
+import type { AgentProviderId } from "../types/index.js";
 import { StreamJsonParser, type StreamEvent } from "./parser.js";
+import { DEFAULT_PROVIDER_ID, getProvider } from "./providers/index.js";
 
 // --------------------------------------------------
 // 型定義
 // --------------------------------------------------
 
 export interface ExecutorOptions {
+  /** 実行基盤（Provider）。省略時は cursor */
+  provider?: AgentProviderId;
   /** 使用する LLM モデル名 */
   model: string;
   /** プロンプト（systemPrompt + "\n\n" + userPrompt） */
@@ -25,6 +29,10 @@ export interface ExecutorOptions {
   workingDirectory?: string;
   /** タイムアウト（ミリ秒） */
   timeout_ms?: number;
+  /** kuromajutsu の HTTP MCP エンドポイント（Claude Provider がサブ Agent に渡す） */
+  mcpUrl?: string;
+  /** Claude Code の --permission-mode */
+  permissionMode?: string;
 }
 
 export interface ExecutorCallbacks {
@@ -41,7 +49,7 @@ export interface ExecutorCallbacks {
 // --------------------------------------------------
 
 /**
- * Cursor CLI をヘッドレスモードで子プロセスとして起動・管理するコンポーネント。
+ * Provider の CLI をヘッドレスモードで子プロセスとして起動・管理するコンポーネント。
  */
 export class AgentExecutor {
   /** 実行中プロセスの管理: agentId → ChildProcess */
@@ -59,7 +67,7 @@ export class AgentExecutor {
   // --------------------------------------------------
 
   /**
-   * Cursor CLI を起動する。
+   * Provider の CLI を起動する。
    * @returns 子プロセスの PID
    */
   execute(
@@ -67,28 +75,29 @@ export class AgentExecutor {
     options: ExecutorOptions,
     callbacks: ExecutorCallbacks,
   ): number {
-    // 1. コマンド引数を構築
-    // 注意: Cursor CLI は -m ショートフラグ未対応のため --model を使用
-    const args = [
-      "-p",
-      "--force",
-      "--model",
-      options.model,
-      "--output-format",
-      "stream-json",
-      "--stream-partial-output",
-      options.prompt,
-    ];
+    // 1. Provider からコマンドを構築
+    const provider = getProvider(options.provider ?? DEFAULT_PROVIDER_ID);
+    const { command, args } = provider.buildExecCommand({
+      model: options.model,
+      prompt: options.prompt,
+      mcpUrl: options.mcpUrl,
+      permissionMode: options.permissionMode,
+    });
 
     // 2. child_process.spawn で起動
-    const child = spawn("agent", args, {
+    const child = spawn(command, args, {
       cwd: options.workingDirectory ?? process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    // 3. stdout を StreamJsonParser にパイプ
+    // 3. stdout を StreamJsonParser にパイプし、Provider のノーマライザで共通イベントに変換
     const parser = new StreamJsonParser();
-    parser.on("event", callbacks.onStreamEvent);
+    const normalizer = provider.createNormalizer();
+    parser.on("event", (raw: StreamEvent) => {
+      for (const event of normalizer.normalize(raw)) {
+        callbacks.onStreamEvent(event);
+      }
+    });
     // readable 側を flowing モードにしてバックプレッシャーを回避
     parser.resume();
     child.stdout?.pipe(parser);

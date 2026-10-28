@@ -1259,6 +1259,122 @@ a:hover {
   padding: 8px 12px;
 }
 
+/* ============================================================
+   Scheduled Steps パイプライン表示
+   ============================================================ */
+
+.scheduled-steps {
+  margin-top: 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.pipeline-layer {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pipeline-connector {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.pipeline-connector-line {
+  width: 2px;
+  height: 16px;
+  background: var(--border);
+}
+
+.step-card {
+  flex: 1;
+  min-width: 160px;
+  max-width: 280px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  transition: border-color 0.2s;
+}
+
+.step-card--pending {
+  border-color: var(--border);
+  opacity: 0.7;
+}
+
+.step-card--in_progress {
+  border-color: var(--accent-purple);
+  border-left: 3px solid var(--accent-purple);
+}
+
+.step-card--completed {
+  border-color: #10b981;
+  border-left: 3px solid #10b981;
+}
+
+.step-card--skipped {
+  border-color: var(--border);
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.step-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.step-role-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--accent-purple);
+}
+
+.step-status-badge {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  text-align: center;
+  line-height: 18px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.step-status--pending {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-tertiary);
+}
+
+.step-status--in_progress {
+  background: rgba(139, 92, 246, 0.15);
+  color: var(--accent-purple);
+}
+
+.step-status--completed {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.step-status--skipped {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-tertiary);
+}
+
+.step-description {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 .ledger-judgments {
   display: flex;
   flex-direction: column;
@@ -1334,8 +1450,8 @@ a:hover {
 
 .action-card {
   background: var(--bg-primary);
-  border: 1px solid var(--accent-purple);
-  border-left: 3px solid var(--accent-purple);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
   border-radius: 6px;
   padding: 10px 14px;
 }
@@ -1343,7 +1459,7 @@ a:hover {
 .action-card-label {
   font-size: 11px;
   font-weight: 600;
-  color: var(--accent-purple);
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 6px;
@@ -1486,4 +1602,25 @@ a:hover {
   .history-table {
     font-size: 12px;
   }
+}
+
+/* Provider バッジ（cursor / claude） */
+.provider-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.2));
+  color: var(--text-secondary);
+}
+
+.provider-badge-claude {
+  color: #d97757;
+  border-color: #d97757;
+}
+
+.provider-badge-cursor {
+  color: #5aa9e6;
+  border-color: #5aa9e6;
 }

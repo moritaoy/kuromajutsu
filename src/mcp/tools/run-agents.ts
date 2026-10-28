@@ -75,6 +75,7 @@ export function handleRunAgents(
               groupId: a.groupId,
               role: a.role,
               model: a.model,
+              provider: a.provider,
               status: a.status,
             })),
             total: agents.length,

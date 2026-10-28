@@ -4,14 +4,20 @@
 //
 // 責務:
 // - MCPサーバー起動時に自動実行
-// - agent models コマンドで利用可能モデル一覧を取得
-// - 各職種に設定されたモデルが利用可能か照合
+// - Provider（Cursor / Claude）ごとに利用可能モデル一覧を取得
+// - 各職種に設定されたモデルが、その職種の Provider で利用可能か照合
 // - モデル検証通過済みの職種に対して healthCheckPrompt で動作確認
 // - 結果をコンソールと WebSocket（ダッシュボード）にリアルタイム通知
 
 import { execFile } from "node:child_process";
 import { getToolDefinition } from "../agent/tools.js";
+import {
+  getProvider,
+  resolveProviderId,
+  type AgentProvider,
+} from "../agent/providers/index.js";
 import type {
+  AgentProviderId,
   AppConfig,
   HealthCheckResult,
   RoleDefinition,
@@ -80,6 +86,12 @@ class DefaultCliRunner implements CliRunner {
   }
 }
 
+/** モデル一覧コマンドの表示用ラベル（例: "agent models"） */
+function listCommandLabel(provider: AgentProvider): string {
+  const cmd = provider.buildListModelsCommand();
+  return cmd ? `${cmd.command} ${cmd.args.join(" ")}` : `${provider.id} models`;
+}
+
 // --------------------------------------------------
 // HealthChecker
 // --------------------------------------------------
@@ -88,16 +100,22 @@ class DefaultCliRunner implements CliRunner {
  * MCPサーバー起動時にモデル検証とヘルスチェックプロンプトを実行する。
  *
  * フロー:
- * 1. `agent models` で利用可能モデル一覧を取得
- * 2. 各職種のモデルを一覧と照合（モデル検証）
- * 3. モデル検証通過済み職種に `healthCheckPrompt` を実行
+ * 1. 使用中の Provider ごとに利用可能モデル一覧を取得（cursor: `agent models` / claude: 静的一覧）
+ * 2. 各職種のモデルを、その職種の Provider の一覧と照合（モデル検証）
+ * 3. モデル検証通過済み職種に `healthCheckPrompt` を Provider の CLI で実行
  * 4. 結果を HealthCheckResult[] として返却
  */
 export class HealthChecker {
   private runner: CliRunner;
 
-  /** 最後に取得した利用可能モデル一覧（runAll 実行後に設定される） */
+  /** 最後に取得した利用可能モデル一覧（全 Provider の和集合。runAll 実行後に設定される） */
   public availableModels: string[] = [];
+
+  /** Provider 別の利用可能モデル一覧（runAll 実行後に設定される） */
+  public availableModelsByProvider: Record<AgentProviderId, string[]> = {
+    cursor: [],
+    claude: [],
+  };
 
   constructor(
     private config: AppConfig,
@@ -112,15 +130,28 @@ export class HealthChecker {
   async runAll(callbacks?: HealthCheckCallbacks): Promise<HealthCheckResult[]> {
     console.error("[health] ヘルスチェックを開始します...");
 
-    // 1. agent models で利用可能モデル一覧を取得
-    const availableModels = await this.getAvailableModels();
+    // 1. 使用中の Provider ごとに利用可能モデル一覧を取得
+    const modelsByProvider = new Map<AgentProviderId, string[] | null>();
+    const usedProviders = new Set(this.config.roles.map((r) => resolveProviderId(r)));
+    for (const providerId of usedProviders) {
+      modelsByProvider.set(providerId, await this.getAvailableModels(providerId));
+    }
 
     // 利用可能モデル一覧を公開プロパティに保存
-    this.availableModels = availableModels ?? [];
+    this.availableModelsByProvider = { cursor: [], claude: [] };
+    for (const [providerId, models] of modelsByProvider) {
+      this.availableModelsByProvider[providerId] = models ?? [];
+    }
+    this.availableModels = [
+      ...new Set([
+        ...this.availableModelsByProvider.cursor,
+        ...this.availableModelsByProvider.claude,
+      ]),
+    ];
 
     // 2. 各職種のモデル検証
     const results: HealthCheckResult[] = this.config.roles.map((role) =>
-      this.validateModel(role, availableModels),
+      this.validateModel(role, modelsByProvider.get(resolveProviderId(role)) ?? null),
     );
 
     // モデル検証結果をコールバック通知
@@ -131,7 +162,7 @@ export class HealthChecker {
       const icon = result.modelValidation.status === "valid" ? "✅" : "❌";
       const role = this.config.roles.find((r) => r.id === result.roleId);
       console.error(
-        `[health]   ${icon} ${result.roleId} (${role?.model ?? "?"}) — モデル検証: ${result.modelValidation.status}`,
+        `[health]   ${icon} ${result.roleId} (${result.provider}/${role?.model ?? "?"}) — モデル検証: ${result.modelValidation.status}`,
       );
     }
 
@@ -211,38 +242,43 @@ export class HealthChecker {
   // ==================================================
 
   /**
-   * `agent models` コマンドを実行し、利用可能モデル一覧を取得する。
-   * 失敗した場合は null を返す。
+   * Provider の利用可能モデル一覧を取得する。
+   * モデル一覧コマンドを持たない Provider は静的一覧を返す。
+   * コマンドが失敗した場合は null を返す。
    */
-  private async getAvailableModels(): Promise<string[] | null> {
+  private async getAvailableModels(providerId: AgentProviderId): Promise<string[] | null> {
+    const provider = getProvider(providerId);
+    const listCommand = provider.buildListModelsCommand();
+    if (!listCommand) {
+      return provider.staticModels;
+    }
+
+    const label = listCommandLabel(provider);
     try {
-      const result = await this.runner.execCommand("agent", ["models"]);
+      const result = await this.runner.execCommand(listCommand.command, listCommand.args);
 
       if (result.exitCode !== 0) {
         console.error(
-          `[health] agent models コマンドが失敗しました (exitCode=${result.exitCode})`,
+          `[health] ${label} コマンドが失敗しました (exitCode=${result.exitCode})`,
         );
         return null;
       }
 
-      // 各行をパースし、モデルIDを抽出する
-      // agent models の出力形式: "id - Display Name" （1行1モデル）
-      // ヘッダー行 ("Available models") やフッター行 ("Tip: ...") を除外する
-      const models = result.stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .filter((line) => line.includes(" - "))       // "id - Name" 形式の行のみ
-        .map((line) => line.split(" - ")[0].trim());  // "id" 部分だけ抽出
+      const models = provider.parseModelList(result.stdout);
+      if (models.length === 0) {
+        console.error(
+          `[health] ${label} の出力からモデルを取得できませんでした: ${JSON.stringify(result.stdout.slice(0, 300))}`,
+        );
+      }
 
       console.error(
-        `[health] 利用可能モデル: ${models.join(", ")} (${models.length} 件)`,
+        `[health] 利用可能モデル (${providerId}): ${models.join(", ")} (${models.length} 件)`,
       );
 
       return models;
     } catch (error) {
       console.error(
-        `[health] agent models コマンドの実行に失敗しました: ${error instanceof Error ? error.message : String(error)}`,
+        `[health] ${label} コマンドの実行に失敗しました: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }
@@ -256,14 +292,17 @@ export class HealthChecker {
     availableModels: string[] | null,
   ): HealthCheckResult {
     const now = new Date().toISOString();
+    const providerId = resolveProviderId(role);
+    const provider = getProvider(providerId);
 
-    // agent models が失敗した場合は全職種 invalid
+    // モデル一覧の取得に失敗した Provider の職種は invalid
     if (availableModels === null) {
       return {
         roleId: role.id,
+        provider: providerId,
         modelValidation: {
           status: "invalid",
-          message: "agent models コマンドの実行に失敗したため検証できません",
+          message: `${listCommandLabel(provider)} コマンドの実行に失敗したため検証できません`,
           checkedAt: now,
         },
         healthCheck: {
@@ -275,11 +314,12 @@ export class HealthChecker {
     }
 
     // モデルが一覧に含まれているか
-    const isValid = availableModels.includes(role.model);
+    const isValid = provider.isModelAvailable(role.model, availableModels);
 
     if (isValid) {
       return {
         roleId: role.id,
+        provider: providerId,
         modelValidation: {
           status: "valid",
           checkedAt: now,
@@ -295,9 +335,10 @@ export class HealthChecker {
 
     return {
       roleId: role.id,
+      provider: providerId,
       modelValidation: {
         status: "invalid",
-        message: `モデル '${role.model}' は利用できません`,
+        message: `モデル '${role.model}' は ${providerId} では利用できません`,
         checkedAt: now,
         availableModels,
       },
@@ -311,7 +352,7 @@ export class HealthChecker {
 
   /**
    * 職種に対してヘルスチェックプロンプトを実行する。
-   * `agent -p --trust --model {model} "{healthCheckPrompt}"` コマンドを実行し、
+   * Provider の CLI でヘルスチェックプロンプトを実行し、
    * 正常にレスポンスが返ればチェック通過とする。
    */
   private async runHealthCheckPrompt(
@@ -321,13 +362,11 @@ export class HealthChecker {
     const now = () => new Date().toISOString();
 
     try {
-      const result = await this.runner.execCommand("agent", [
-        "-p",
-        "--trust",
-        "--model",
+      const { command, args } = getProvider(resolveProviderId(role)).buildHealthCheckCommand(
         role.model,
         role.healthCheckPrompt,
-      ]);
+      );
+      const result = await this.runner.execCommand(command, args);
 
       const responseTime_ms = Date.now() - startTime;
 

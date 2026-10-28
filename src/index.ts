@@ -46,6 +46,7 @@ async function main(): Promise<void> {
   });
   manager.setHealthCheckResults(healthResults);
   manager.setAvailableModels(checker.availableModels);
+  manager.setAvailableModelsByProvider(checker.availableModelsByProvider);
 
   // 6. MCP サーバー起動（stdio — Cursor からプロセス起動された場合のみ）
   if (!process.stdin.isTTY) {

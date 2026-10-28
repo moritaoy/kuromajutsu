@@ -835,4 +835,119 @@ describe("HealthChecker", () => {
       expect(results[0].toolChecks![0].reason).toContain("ツール定義が見つかりません");
     });
   });
+
+  // ==================================================
+  // マルチ Provider（cursor / claude 混在）
+  // ==================================================
+
+  describe("マルチ Provider", () => {
+    function mixedConfig(): AppConfig {
+      return createTestConfig({
+        roles: [
+          {
+            id: "cursor-role",
+            name: "cursor",
+            description: "d",
+            provider: "cursor",
+            model: "composer-2.5-fast",
+            systemPrompt: "s",
+            healthCheckPrompt: "OK?",
+          },
+          {
+            id: "claude-role",
+            name: "claude",
+            description: "d",
+            provider: "claude",
+            model: "sonnet",
+            systemPrompt: "s",
+            healthCheckPrompt: "OK?",
+          },
+        ],
+      });
+    }
+
+    function mixedRunner() {
+      return createMockRunner({
+        execCommand: vi.fn().mockImplementation(async (cmd: string, args: string[]) => {
+          if (cmd === "agent" && args[0] === "models") {
+            return { stdout: "composer-2.5-fast - Composer\n", exitCode: 0 };
+          }
+          return { stdout: "OK", exitCode: 0 };
+        }),
+      });
+    }
+
+    it("provider 別にモデル検証し、HealthCheckResult に provider を含める", async () => {
+      const checker = new HealthChecker(mixedConfig(), mixedRunner());
+      const results = await checker.runAll();
+
+      expect(results.find((r) => r.roleId === "cursor-role")).toMatchObject({
+        provider: "cursor",
+        available: true,
+      });
+      expect(results.find((r) => r.roleId === "claude-role")).toMatchObject({
+        provider: "claude",
+        available: true,
+      });
+    });
+
+    it("provider 省略の職種は cursor として扱う", async () => {
+      const checker = new HealthChecker(config, mixedRunner());
+      const results = await checker.runAll();
+      expect(results.every((r) => r.provider === "cursor")).toBe(true);
+    });
+
+    it("claude の職種では agent models を使わず、claude CLI でヘルスチェックする", async () => {
+      const runner = mixedRunner();
+      const checker = new HealthChecker(mixedConfig(), runner);
+      await checker.runAll();
+
+      expect(runner.execCommand).toHaveBeenCalledWith("claude", ["-p", "OK?", "--model", "sonnet"]);
+      expect(runner.execCommand).toHaveBeenCalledWith("agent", [
+        "-p", "--trust", "--model", "composer-2.5-fast", "OK?",
+      ]);
+      // claude 向けにはモデル一覧コマンドを実行しない
+      expect(runner.execCommand).not.toHaveBeenCalledWith("claude", ["models"]);
+    });
+
+    it("claude のモデルがエイリアス/claude-* 以外なら invalid", async () => {
+      const cfg = mixedConfig();
+      cfg.roles[1].model = "gpt-5.5-high";
+      const checker = new HealthChecker(cfg, mixedRunner());
+      const results = await checker.runAll();
+
+      const r = results.find((x) => x.roleId === "claude-role")!;
+      expect(r.modelValidation.status).toBe("invalid");
+      expect(r.available).toBe(false);
+      // cursor 側には影響しない
+      expect(results.find((x) => x.roleId === "cursor-role")!.available).toBe(true);
+    });
+
+    it("cursor の models 取得に失敗しても claude の職種は検証できる", async () => {
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(async (cmd: string, args: string[]) => {
+          if (cmd === "agent" && args[0] === "models") return { stdout: "", exitCode: 1 };
+          return { stdout: "OK", exitCode: 0 };
+        }),
+      });
+      const checker = new HealthChecker(mixedConfig(), runner);
+      const results = await checker.runAll();
+
+      expect(results.find((x) => x.roleId === "cursor-role")!.available).toBe(false);
+      expect(results.find((x) => x.roleId === "claude-role")!.available).toBe(true);
+    });
+
+    it("availableModelsByProvider に Provider 別のモデル一覧を保持し、availableModels は和集合", async () => {
+      const checker = new HealthChecker(mixedConfig(), mixedRunner());
+      await checker.runAll();
+
+      expect(checker.availableModelsByProvider.cursor).toEqual(["composer-2.5-fast"]);
+      expect(checker.availableModelsByProvider.claude).toEqual(
+        expect.arrayContaining(["sonnet", "opus", "haiku"]),
+      );
+      expect(checker.availableModels).toEqual(
+        expect.arrayContaining(["composer-2.5-fast", "sonnet", "opus", "haiku"]),
+      );
+    });
+  });
 });

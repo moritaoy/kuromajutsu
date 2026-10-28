@@ -33,6 +33,7 @@ export function handleGetAgentStatus(
           groupId: agent.groupId,
           role: agent.role,
           model: agent.model,
+          provider: agent.provider,
           status: agent.status,
           startedAt: agent.startedAt,
           elapsed_ms,

@@ -11,6 +11,7 @@ export function handleListRoles(config: AppConfig) {
     id: role.id,
     name: role.name,
     description: role.description,
+    provider: role.provider ?? "cursor",
     model: role.model,
   }));
 

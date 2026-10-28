@@ -3,6 +3,13 @@
 // ============================================================
 
 // --------------------------------------------------
+// Provider（Agent 実行基盤）
+// --------------------------------------------------
+
+/** Agent の実行基盤（Provider）の ID */
+export type AgentProviderId = "cursor" | "claude";
+
+// --------------------------------------------------
 // グループ (Group)
 // --------------------------------------------------
 
@@ -46,7 +53,9 @@ export interface RoleDefinition {
   description: string;
   /** Agent に渡すシステムプロンプト */
   systemPrompt: string;
-  /** 使用する LLM モデル名（Cursor CLI の -m オプションに渡す値） */
+  /** Agent の実行基盤（Provider）。省略時は "cursor" */
+  provider?: AgentProviderId;
+  /** 使用する LLM モデル名（Provider の CLI の --model に渡す値） */
   model: string;
   /** 使用可能なツール ID の一覧（ツールレジストリで定義されたツールを参照） */
   tools?: string[];
@@ -99,6 +108,8 @@ export interface AgentState {
   role: string;
   /** 使用モデル */
   model: string;
+  /** 使用 Provider */
+  provider: AgentProviderId;
   /** 現在のステータス */
   status: AgentStatus;
   /** 開始日時（ISO 8601） */
@@ -185,6 +196,20 @@ export interface MagenticConfig {
 // Magentic Ledger（台帳）
 // --------------------------------------------------
 
+/** 作業予定ステップ（Magentic 用） */
+export interface ScheduledStep {
+  /** ステップID（orchestrator が任意に付与、例: "step-1"） */
+  stepId: string;
+  /** 使用する職種 ID */
+  role: string;
+  /** タスクの説明 */
+  description: string;
+  /** ステータス */
+  status: "pending" | "in_progress" | "completed" | "skipped";
+  /** 依存する stepId の配列（省略時は依存なし = 即時実行可能） */
+  dependsOn?: string[];
+}
+
 /** タスク台帳: Orchestrator のタスク分析結果 */
 export interface TaskLedger {
   /** 事実の分類 */
@@ -198,8 +223,10 @@ export interface TaskLedger {
     /** 推測 */
     assumptions: string[];
   };
-  /** 実行計画ステップ */
+  /** 実行計画ステップ（高レベル） */
   plan: string[];
+  /** 構造化された作業予定（role 割り当て・依存関係付き） */
+  scheduledSteps?: ScheduledStep[];
   /** 更新日時（ISO 8601） */
   updatedAt: string;
 }
@@ -275,6 +302,8 @@ export interface AgentResult {
   duration_ms: number;
   /** 使用モデル */
   model: string;
+  /** 使用 Provider */
+  provider?: AgentProviderId;
   /** 職種 ID */
   role: string;
   /** ツール呼び出し回数 */
@@ -313,6 +342,8 @@ export interface ToolCheckResult {
 export interface HealthCheckResult {
   /** チェック対象の職種 ID */
   roleId: string;
+  /** 職種の Provider */
+  provider: AgentProviderId;
   /** モデル検証結果 */
   modelValidation: {
     status: ModelValidationStatus;
@@ -353,9 +384,22 @@ export interface LogConfig {
   level: "debug" | "info" | "warn" | "error";
 }
 
+/** Claude Provider 設定 */
+export interface ClaudeProviderConfig {
+  /** Claude Code の --permission-mode（デフォルト: bypassPermissions） */
+  permissionMode?: string;
+}
+
+/** Provider 別設定 */
+export interface ProvidersConfig {
+  claude?: ClaudeProviderConfig;
+}
+
 /** アプリケーション設定全体 */
 export interface AppConfig {
   dashboard: DashboardConfig;
+  /** Provider 別設定（省略可） */
+  providers?: ProvidersConfig;
   agent: AgentConfig;
   log: LogConfig;
   roles: RoleDefinition[];
@@ -367,7 +411,14 @@ export interface AppConfig {
 
 /** サーバー → クライアント イベント */
 export type ServerEvent =
-  | { type: "server:startup"; data: { startedAt: string; availableModels: string[] } }
+  | {
+      type: "server:startup";
+      data: {
+        startedAt: string;
+        availableModels: string[];
+        availableModelsByProvider: Record<AgentProviderId, string[]>;
+      };
+    }
   | { type: "healthcheck:model_validation"; data: { results: HealthCheckResult[] } }
   | { type: "healthcheck:role_start"; data: { roleId: string } }
   | { type: "healthcheck:role_complete"; data: HealthCheckResult }

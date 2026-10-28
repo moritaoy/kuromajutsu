@@ -19,7 +19,7 @@ import { StringDecoder } from "node:string_decoder";
 /** stream-json のイベント型 */
 export interface StreamEvent {
   type: "system" | "user" | "assistant" | "thinking" | "tool_call" | "result";
-  subtype?: "init" | "delta" | "started" | "completed" | "success";
+  subtype?: "init" | "delta" | "started" | "completed" | "success" | "error";
   /** イベント固有のデータ */
   data: Record<string, unknown>;
 }

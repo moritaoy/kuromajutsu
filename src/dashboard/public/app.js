@@ -127,7 +127,7 @@ function HealthPage({ state }) {
 function InfoPage({ state }) {
   return h("div", null,
     h("h2", { className: "page-title" }, "システム情報"),
-    h(ModelList, { models: state.availableModels }),
+    h(ModelList, { models: state.availableModels, modelsByProvider: state.availableModelsByProvider }),
   );
 }
 

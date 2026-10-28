@@ -14,6 +14,7 @@ const initialState = {
   serverStatus: "connecting",
   serverStartedAt: null,
   availableModels: [], // 利用可能モデル一覧
+  availableModelsByProvider: {}, // Provider 別の利用可能モデル一覧
   stageProgress: {},   // groupId → { current: number, total: number }
   magenticProgress: {}, // groupId → { iteration, maxIterations }
   ledgers: {},          // groupId → MagenticLedger
@@ -30,6 +31,7 @@ function agentReducer(state, action) {
         serverStatus: "connected",
         serverStartedAt: action.data.startedAt,
         availableModels: action.data.availableModels || [],
+        availableModelsByProvider: action.data.availableModelsByProvider || {},
       };
 
     case "healthcheck:model_validation":

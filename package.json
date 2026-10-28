@@ -1,7 +1,7 @@
 {
   "name": "kuromajutsu",
   "version": "0.1.0",
-  "description": "Cursor Agent 並列実行管理システム — MCP サーバー",
+  "description": "Cursor / Claude マルチ Provider Agent 並列実行管理システム — MCP サーバー",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -14,6 +14,7 @@
   "keywords": [
     "mcp",
     "cursor",
+    "claude",
     "agent"
   ],
   "license": "MIT",

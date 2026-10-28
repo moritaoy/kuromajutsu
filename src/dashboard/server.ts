@@ -13,6 +13,7 @@ import { resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { AgentManager } from "../agent/manager.js";
+import { isAgentProviderId } from "../agent/providers/index.js";
 import type { AppConfig, ServerEvent, ClientEvent } from "../types/index.js";
 import { writeFileSync } from "node:fs";
 import { stringify as stringifyYaml } from "yaml";
@@ -189,6 +190,7 @@ function sendInitialState(
     data: {
       startedAt: new Date().toISOString(),
       availableModels: manager.getAvailableModels(),
+      availableModelsByProvider: manager.getAvailableModelsByProvider(),
     },
   });
 
@@ -255,6 +257,11 @@ function handleClientEvent(
         return;
       }
 
+      if (updates.provider !== undefined && !isAgentProviderId(updates.provider)) {
+        console.warn(`[dashboard] 未対応の provider です: ${String(updates.provider)}`);
+        return;
+      }
+
       // 職種設定を更新
       Object.assign(config.roles[roleIndex], updates);
 
@@ -265,6 +272,7 @@ function handleClientEvent(
           resolve(process.cwd(), "kuromajutsu.config.yaml");
         const yamlContent = stringifyYaml({
           dashboard: config.dashboard,
+          ...(config.providers ? { providers: config.providers } : {}),
           agent: config.agent,
           log: config.log,
           roles: config.roles,

@@ -1,12 +1,14 @@
 # Kuromajutsu
 
-Cursor Agent 並列実行管理システム。MCP サーバーとして Cursor と連携し、複数のサブ Agent を並列に起動・管理する。
+Cursor / Claude マルチ Provider Agent 並列実行管理システム。MCP サーバーとして Cursor / Claude Code と連携し、複数のサブ Agent を並列に起動・管理する。職種ごとに Provider（`cursor` / `claude`）とモデルを指定でき、複数 Provider のモデルを混在させて実行できる。
 
 ## 前提条件
 
 - Node.js >= 20
 - Docker / Docker Compose（テスト・ビルド用）
-- Cursor IDE（Agent 実行に必要）
+- Agent 実行に使う Provider の CLI（職種で使うものだけ必要）
+  - `cursor`: Cursor CLI（`agent` コマンド）
+  - `claude`: Claude Code CLI（`claude` コマンド）
 
 ## セットアップ
 
@@ -32,7 +34,7 @@ textlint のルール設定はプロジェクトルートの `.textlintrc.json` 
 
 ### 開発モード（ホスト上で実行）
 
-Cursor CLI（`agent` コマンド）を使うため、ホスト上で直接実行する。
+Cursor CLI（`agent`）/ Claude Code CLI（`claude`）を使うため、ホスト上で直接実行する。
 ヘルスチェック・Agent 実行・モデル一覧取得がすべて動作する。
 
 ```bash
@@ -43,7 +45,7 @@ npm run dev
 
 ### ダッシュボード確認のみ（Docker）
 
-Cursor CLI が不要な UI 確認用途。ヘルスチェックやAgent 実行は動作しない。
+Provider の CLI が不要な UI 確認用途。ヘルスチェックやAgent 実行は動作しない。
 
 ```bash
 docker compose up
@@ -65,6 +67,30 @@ docker compose run --rm app npm run build
 # 型チェック
 docker compose run --rm app npx tsc --noEmit
 ```
+
+## Provider とモデルの設定
+
+職種ごとに `kuromajutsu.config.yaml` の `provider` と `model` を指定する（`provider` 省略時は `cursor`）。
+
+```yaml
+roles:
+  - id: impl-code
+    provider: claude      # Claude Code CLI
+    model: sonnet         # sonnet / opus / haiku または claude-* の完全 ID
+    ...
+  - id: code-review
+    provider: cursor      # Cursor CLI
+    model: composer-2.5-fast   # `agent models` で表示される ID
+    ...
+
+# 省略可: Claude Code の --permission-mode（デフォルト bypassPermissions）
+providers:
+  claude:
+    permissionMode: bypassPermissions
+```
+
+- `claude` Provider のサブ Agent は無人実行のため、デフォルトでは権限確認をすべてバイパスする（Cursor の `--force` 相当）。制限したい場合は `permissionMode` を変更する
+- サブ Agent の `report_result` 用に、`--mcp-config` で `http://localhost:9696/mcp` が自動的に渡される
 
 ## Cursor MCP 設定
 
@@ -88,9 +114,17 @@ npm run dev
 
 **注意**: サーバーが起動している必要があります。サーバーを停止すると MCP 接続も切断されます。
 
+## Claude Code MCP 設定
+
+メイン Agent として Claude Code から使う場合:
+
+```bash
+claude mcp add --transport http kuromajutsu http://localhost:9696/mcp
+```
+
 ## 使い方
 
-Cursor Agent から MCP ツール経由で操作する。
+メイン Agent（Cursor / Claude Code）から MCP ツール経由で操作する。
 
 ```
 1. list_roles          → 利用可能な職種・モデルを確認
@@ -109,3 +143,5 @@ Cursor Agent から MCP ツール経由で操作する。
 - WebSocket (`ws`)
 - React SPA (CDN, ビルドステップなし)
 - Docker / Docker Compose（テスト・ビルド用）
+
+Magentic テスト実行済み
