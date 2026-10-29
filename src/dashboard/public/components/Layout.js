@@ -6,11 +6,18 @@ import { createElement as h } from "react";
 
 const NAV_ITEMS = [
   { hash: "#/", label: "Dashboard" },
+  { hash: "#/workspace", label: "Workspace" },
   { hash: "#/roles", label: "Roles" },
   { hash: "#/history", label: "History" },
   { hash: "#/health", label: "Health" },
   { hash: "#/info", label: "Info" },
 ];
+
+/** `#/workspace/<id>` でも Workspace のナビを選択状態にする */
+function isActive(currentRoute, hash) {
+  if (hash === "#/") return currentRoute === "#/";
+  return currentRoute === hash || currentRoute.startsWith(`${hash}/`);
+}
 
 /**
  * @param {{ currentRoute: string, onNavigate: (hash: string) => void, connected: boolean, children: any }} props
@@ -35,7 +42,7 @@ export function Layout({ currentRoute, onNavigate, connected, children }) {
       NAV_ITEMS.map((item) =>
         h("div", {
           key: item.hash,
-          className: `nav-item ${currentRoute === item.hash ? "active" : ""}`,
+          className: `nav-item ${isActive(currentRoute, item.hash) ? "active" : ""}`,
           onClick: () => {
             window.location.hash = item.hash;
             onNavigate(item.hash);

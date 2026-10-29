@@ -14,6 +14,7 @@ import { HealthStatus } from "./components/HealthStatus.js";
 import { RoleEditor } from "./components/RoleEditor.js";
 import { HistoryTable } from "./components/HistoryTable.js";
 import { ModelList } from "./components/ModelList.js";
+import { WorkspacePage } from "./components/workspace/WorkspacePage.js";
 
 // ============================================================
 // ダッシュボード画面（メイン）
@@ -166,6 +167,10 @@ function App() {
 
   // ルーティング
   const renderPage = () => {
+    // Workspace: `#/workspace` と `#/workspace/<id>`（プレフィックス一致）
+    if (route === "#/workspace" || route.startsWith("#/workspace/")) {
+      return h(WorkspacePage, { route, state, dispatch });
+    }
     switch (route) {
       case "#/":
         return h(DashboardPage, { state });
