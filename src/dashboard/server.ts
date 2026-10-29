@@ -16,7 +16,7 @@ import type { AgentManager } from "../agent/manager.js";
 import { isAgentProviderId } from "../agent/providers/index.js";
 import type { AppConfig, ServerEvent, ClientEvent } from "../types/index.js";
 import type { WorkspaceService } from "../workspace/service.js";
-import { handleWorkspaceApi } from "./api/workspaces.js";
+import { handleWorkspaceApi, isAllowedOrigin } from "./api/workspaces.js";
 import { existsSync, writeFileSync } from "node:fs";
 import { isMap, isSeq, parseDocument, stringify as stringifyYaml } from "yaml";
 
@@ -72,7 +72,22 @@ export function startDashboardServer(
   // --------------------------------------------------
   // WebSocket サーバー
   // --------------------------------------------------
-  const wss = new WebSocketServer({ server });
+  // Origin ヘッダーがあるとき（ブラウザからの接続）は HTTP API と同じ規則で検査する。
+  // Origin が無い接続（ブラウザ以外のクライアント）は許可する。
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: (
+      info: { origin: string; req: IncomingMessage },
+      done: (result: boolean, code?: number, message?: string) => void,
+    ) => {
+      const origin = info.req.headers.origin;
+      if (origin === undefined || isAllowedOrigin(String(origin), info.req.headers.host)) {
+        done(true);
+      } else {
+        done(false, 403, "Forbidden");
+      }
+    },
+  });
 
   wss.on("connection", (ws: WebSocket) => {
     // 初期データ送信

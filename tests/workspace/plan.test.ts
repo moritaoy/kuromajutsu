@@ -241,24 +241,67 @@ describe("toTaskLedgerInput", () => {
 });
 
 describe("computeMaxIterations", () => {
-  it("固定フェーズの手順 + 未決定 × 3 + ゲート × 2 を数える", () => {
-    // 固定の手順 4 + 未決定 1 × 3 + ゲート 4 + ゲート 4 = 15
-    expect(computeMaxIterations(makeAuthPlan())).toBe(15);
+  it("固定の work × 2 + 未決定 × 4 + ゲート × (2 + maxRetries) + human ゲート × 2 を数える", () => {
+    // 固定の work 4 × 2 = 8 / 未決定 1 × 4 = 4 / ゲート 4 × (2 + 2) = 16（fixtures のゲートは maxRetries 2）
+    // / human ゲート 1 × 2 = 2 → 30
+    expect(computeMaxIterations(makeAuthPlan())).toBe(30);
   });
 
-  it("未決定フェーズの手順は数えない", () => {
+  it("未決定フェーズの手順は数えず、未決定 1 つにつき 4 を数える", () => {
     const plan = makeAuthPlan();
-    plan.phases[0].planning = "deferred";
-    // 固定フェーズの work: s3, s4 = 2 / 未決定 2 × 3 = 6 / ゲート 4 × 2 = 8 → 16
-    expect(computeMaxIterations(plan)).toBe(16);
+    plan.phases[1].planning = "deferred"; // P2（手順なし）
+    plan.phases[2].planning = "deferred"; // P3（s3 / s4 は数えない）
+    plan.steps = plan.steps.filter((s) => s.id === "gate-P2" || s.id === "gate-P3" || s.id === "gate-final" || s.id === "s3" || s.id === "s4");
+    for (const s of plan.steps) delete s.onFail; // 既定 maxRetries 2
+    // 固定フェーズの work 0 / 未決定 2 × 4 = 8 / ゲート 3 × (2 + 2) = 12 / human 0 → 20
+    // （係数が 3 なら 18、5 なら 22 になる）
+    expect(computeMaxIterations(plan)).toBe(20);
+    plan.phases[0].planning = "deferred"; // 未決定 3 つ
+    expect(computeMaxIterations(plan)).toBe(24);
   });
 
-  it("小さな計画でも下限は 10", () => {
+  it("human チェックを含むゲートが 1 つにつき 2 加算される", () => {
+    const plan = makeAuthPlan();
+    const base = computeMaxIterations(plan);
+    getStep(plan, "gate-P3")!.checks = [{ text: "確認", method: "human" }];
+    expect(computeMaxIterations(plan)).toBe(base + 2);
+    // 1 つのゲートに human が複数あっても 1 ゲートにつき 2
+    getStep(plan, "gate-P3")!.checks = [
+      { text: "確認 1", method: "human" },
+      { text: "確認 2", method: "human" },
+    ];
+    expect(computeMaxIterations(plan)).toBe(base + 2);
+  });
+
+  it("onFail.maxRetries がゲートごとに反映される（未指定は 2）", () => {
+    const plan = makeAuthPlan();
+    const base = computeMaxIterations(plan);
+    getStep(plan, "gate-P2")!.onFail = { action: "rework", maxRetries: 5 };
+    expect(computeMaxIterations(plan)).toBe(base + 3);
+    getStep(plan, "gate-P3")!.onFail = { action: "rework", maxRetries: 0 };
+    expect(computeMaxIterations(plan)).toBe(base + 3 - 2);
+    // 未指定は 2（maxRetries 2 のゲートと同じ）
+    delete getStep(plan, "gate-final")!.onFail;
+    expect(computeMaxIterations(plan)).toBe(base + 3 - 2);
+    getStep(plan, "gate-final")!.onFail = { action: "rework", maxRetries: 1 };
+    expect(computeMaxIterations(plan)).toBe(base + 3 - 2 - 1);
+  });
+
+  it("手順 3・ゲート 4（maxRetries 未指定）・human ゲート 1 の計画は 24", () => {
+    const plan = makeAuthPlan();
+    plan.phases[1].planning = "fixed";
+    plan.steps = plan.steps.filter((s) => s.kind === "gate" || ["s1", "s2", "s3"].includes(s.id));
+    for (const s of plan.steps) delete s.onFail;
+    // 3 × 2 + 4 × (2 + 2) + 1 × 2 = 24
+    expect(computeMaxIterations(plan)).toBe(24);
+  });
+
+  it("小さな計画でも下限は 12", () => {
     const plan = makeAuthPlan();
     plan.steps = plan.steps.filter((s) => s.kind === "gate").slice(0, 1);
     plan.phases = plan.phases.slice(0, 1);
-    // 式の値は 0 + 0 + 1 + 1 = 2
-    expect(computeMaxIterations(plan)).toBe(10);
+    // 式の値は 0 + 0 + (2 + 2) + 2（gate-P1 は human）= 6
+    expect(computeMaxIterations(plan)).toBe(12);
   });
 });
 

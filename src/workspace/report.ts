@@ -18,6 +18,8 @@ import type {
   Workspace,
   WorkspaceReport,
 } from "../types/index.js";
+import fs from "node:fs";
+import path from "node:path";
 import { finalGate, toScheduledSteps } from "./plan.js";
 
 export interface BuildWorkspaceReportInput {
@@ -120,15 +122,52 @@ export function extractReportProse(finalResponse: string | undefined): Record<Pr
 // 各項目
 // --------------------------------------------------
 
-function collectChangedFiles(agents: AgentState[]): WorkspaceReport["changedFiles"] {
+/** workspacePath と、解決できればその realpath（macOS の /tmp → /private/tmp など）を比較候補にする */
+function workspaceRoots(workspacePath: string): string[] {
+  const roots = [path.resolve(workspacePath)];
+  try {
+    const real = fs.realpathSync.native(workspacePath);
+    if (!roots.includes(real)) roots.push(real);
+  } catch {
+    // ディレクトリが無いなど。元のパスだけで比較する
+  }
+  return roots;
+}
+
+/**
+ * Agent の報告（絶対パス）とサーバーの自動収集（相対パス）が混在するため、
+ * workspacePath（または realpath）配下の絶対パスは相対パスに揃えてから重複を除く。
+ * どちらの配下でもないパスは絶対パスのまま残す。
+ */
+function normalizeChangedPath(roots: string[], file: string): string {
+  const p = path.normalize(file);
+  if (!path.isAbsolute(p)) return p;
+  for (const root of roots) {
+    const rel = path.relative(root, p);
+    if (rel === "" || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) continue;
+    return rel;
+  }
+  return p;
+}
+
+function collectChangedFiles(
+  agents: AgentState[],
+  workspacePath: string,
+): WorkspaceReport["changedFiles"] {
   const edited = new Set<string>();
   const created = new Set<string>();
+  const roots = workspaceRoots(workspacePath);
+  const add = (set: Set<string>, f: string) => {
+    if (f.trim() === "") return;
+    set.add(normalizeChangedPath(roots, f));
+  };
   for (const a of agents) {
-    for (const f of a.editedFiles) edited.add(f);
-    for (const f of a.createdFiles) created.add(f);
-    for (const f of a.result?.editedFiles ?? []) edited.add(f);
-    for (const f of a.result?.createdFiles ?? []) created.add(f);
+    for (const f of a.editedFiles) add(edited, f);
+    for (const f of a.createdFiles) add(created, f);
+    for (const f of a.result?.editedFiles ?? []) add(edited, f);
+    for (const f of a.result?.createdFiles ?? []) add(created, f);
   }
+  for (const f of created) edited.delete(f);
   return { editedFiles: [...edited].sort(), createdFiles: [...created].sort() };
 }
 
@@ -310,7 +349,7 @@ export function buildWorkspaceReport(input: BuildWorkspaceReportInput): Workspac
   return {
     summary: prose.summary,
     howToTry: prose.howToTry,
-    changedFiles: collectChangedFiles(agents),
+    changedFiles: collectChangedFiles(agents, workspace.workspacePath),
     humanDecisions: workspace.humanReviews.map(describeReview),
     completion: plan.spec.completion.map((criterion) => ({
       criterion,

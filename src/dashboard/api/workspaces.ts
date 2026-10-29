@@ -82,7 +82,7 @@ const STATUS_BY_CODE: Record<string, number> = {
 // リクエストを拒否する。CORS ヘッダーは返さない。
 // --------------------------------------------------
 
-const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+export const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 function portOf(hostHeader: string, protocol: string): string {
   const m = /:(\d+)$/.exec(hostHeader);
@@ -90,7 +90,7 @@ function portOf(hostHeader: string, protocol: string): string {
 }
 
 /** `Origin` が `Host` と一致する、または loopback の同ポートのときだけ許可する */
-function isAllowedOrigin(origin: string, hostHeader: string | undefined): boolean {
+export function isAllowedOrigin(origin: string, hostHeader: string | undefined): boolean {
   let url: URL;
   try {
     url = new URL(origin);

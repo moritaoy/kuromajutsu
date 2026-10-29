@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildWorkspaceReport } from "../../src/workspace/report.js";
 import type { AgentState, MagenticLedger, Workspace } from "../../src/types/index.js";
 import { makeAuthPlan } from "./fixtures.js";
@@ -263,6 +266,106 @@ describe("buildWorkspaceReport: 変更ファイル・人の判断・完了条件
   it("changedFiles は全 Agent の和集合（重複除去・ソート。自動収集 + 報告の両方）", () => {
     expect(r.changedFiles.editedFiles).toEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
     expect(r.changedFiles.createdFiles).toEqual(["docs/new.md", "src/auth/jwt.ts"]);
+  });
+
+  describe("changedFiles のパス正規化", () => {
+    // workspacePath は /tmp/project
+    const build = (a: AgentState[]) =>
+      buildWorkspaceReport({ ...base, agents: a }).changedFiles;
+    const t = { startedAt: "2026-10-29T00:01:00.000Z", finishedAt: "2026-10-29T00:05:00.000Z" };
+
+    it("絶対パスと相対パスの同じファイルが 1 件になる（./ 先頭も同一視）", () => {
+      const cf = build([
+        agent("a", "impl-code", {
+          ...t,
+          edited: ["src/greet.js", "./src/util.js"],
+          resultEdited: ["/tmp/project/src/greet.js", "/tmp/project/./src/util.js"],
+          created: ["tests/greet.test.js"],
+          resultCreated: ["/tmp/project/tests/greet.test.js"],
+        }),
+      ]);
+      expect(cf.editedFiles).toEqual(["src/greet.js", "src/util.js"]);
+      expect(cf.createdFiles).toEqual(["tests/greet.test.js"]);
+    });
+
+    it("workspacePath の外の絶対パスはそのまま残る", () => {
+      const cf = build([
+        agent("a", "impl-code", {
+          ...t,
+          edited: ["src/a.ts"],
+          resultEdited: ["/other/place/x.ts", "/tmp/project/src/a.ts", "/tmp/project-2/y.ts"],
+        }),
+      ]);
+      expect(cf.editedFiles).toEqual(["/other/place/x.ts", "/tmp/project-2/y.ts", "src/a.ts"]);
+    });
+
+    it("空文字・空白だけのパスは除外される（\".\" にならない）", () => {
+      const cf = build([
+        agent("a", "impl-code", {
+          ...t,
+          edited: ["", "  ", "src/a.ts"],
+          resultEdited: [" ", "/tmp/project/src/a.ts"],
+          created: [""],
+          resultCreated: ["\t", "src/n.ts"],
+        }),
+      ]);
+      expect(cf.editedFiles).toEqual(["src/a.ts"]);
+      expect(cf.createdFiles).toEqual(["src/n.ts"]);
+    });
+
+    it("symlink 経由の workspacePath と、実体パスでの報告が 1 件に揃う", () => {
+      const dir = mkdtempSync(join(tmpdir(), "kuromajutsu-report-"));
+      try {
+        const real = join(dir, "real");
+        const link = join(dir, "link");
+        mkdirSync(real);
+        symlinkSync(real, link);
+        const ws = makeWorkspace({ workspacePath: link });
+        const cf = buildWorkspaceReport({
+          ...base,
+          workspace: ws,
+          agents: [
+            agent("a", "impl-code", {
+              ...t,
+              edited: ["src/greet.js"],
+              resultEdited: [join(realpathSync(real), "src/greet.js"), join(link, "src/greet.js")],
+              resultCreated: [join(realpathSync(real), "tests/greet.test.js")],
+            }),
+          ],
+        }).changedFiles;
+        expect(cf.editedFiles).toEqual(["src/greet.js"]);
+        expect(cf.createdFiles).toEqual(["tests/greet.test.js"]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("workspacePath が存在しない（realpath 失敗）ときは元のパスだけで比較する", () => {
+      const cf = buildWorkspaceReport({
+        ...base,
+        workspace: makeWorkspace({ workspacePath: "/nonexistent/ws-xyz" }),
+        agents: [
+          agent("a", "impl-code", {
+            ...t,
+            edited: ["src/a.ts"],
+            resultEdited: ["/nonexistent/ws-xyz/src/a.ts", "/elsewhere/b.ts"],
+          }),
+        ],
+      }).changedFiles;
+      expect(cf.editedFiles).toEqual(["/elsewhere/b.ts", "src/a.ts"]);
+    });
+
+    it("created と edited の両方にあるファイルは edited から除かれる", () => {
+      const cf = build([
+        agent("a", "impl-code", {
+          ...t,
+          edited: ["src/new.ts", "src/old.ts"],
+          resultCreated: ["/tmp/project/src/new.ts"],
+        }),
+      ]);
+      expect(cf.createdFiles).toEqual(["src/new.ts"]);
+      expect(cf.editedFiles).toEqual(["src/old.ts"]);
+    });
   });
 
   it("humanDecisions は人間レビューごと（ゲート・版・結果・コメント）", () => {

@@ -187,15 +187,28 @@ export function toTaskLedgerInput(plan: WorkPlan): {
 // --------------------------------------------------
 
 /**
+ * onFail.maxRetries の既定値。schema.ts の default / validator.ts の DEFAULT_ON_FAIL /
+ * run.ts・ledger-guard.ts の DEFAULT_MAX_RETRIES と揃える（それらは export されていないため、
+ * ここにも同じ値を置く）。
+ */
+const DEFAULT_GATE_MAX_RETRIES = 2;
+
+/**
  * ```
- * max(10, 固定フェーズの手順数 + 未決定フェーズ数 × 3 + ゲート数 + ゲート数 × 1)
+ * max(12,
+ *     固定フェーズの work Step 数 × 2
+ *   + 未決定フェーズ数 × 4
+ *   + Σ ゲート Step ごとに (2 + maxRetries)      // maxRetries は onFail.maxRetries（未指定は 2）
+ *   + human チェックを含むゲート Step 数 × 2)
  * ```
  */
 export function computeMaxIterations(plan: WorkPlan): number {
   const deferred = new Set(plan.phases.filter((p) => p.planning === "deferred").map((p) => p.id));
   const fixedSteps = plan.steps.filter((s) => s.kind === "work" && !deferred.has(s.phaseId)).length;
-  const gates = plan.steps.filter((s) => s.kind === "gate").length;
-  return Math.max(10, fixedSteps + deferred.size * 3 + gates + gates);
+  const gates = plan.steps.filter((s) => s.kind === "gate");
+  const gateCost = gates.reduce((sum, g) => sum + 2 + (g.onFail?.maxRetries ?? DEFAULT_GATE_MAX_RETRIES), 0);
+  const humanGates = gates.filter(isHumanGate).length;
+  return Math.max(12, fixedSteps * 2 + deferred.size * 4 + gateCost + humanGates * 2);
 }
 
 // --------------------------------------------------

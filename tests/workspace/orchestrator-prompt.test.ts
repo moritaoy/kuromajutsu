@@ -90,6 +90,16 @@ describe("buildWorkspaceInjectionBlock", () => {
     expect(text).toContain("依頼文のひな形");
   });
 
+  it("図は kind: \"mermaid\" の節にする指示（コードブロック不可）を ReviewDoc の説明と依頼ひな形の両方に含む", () => {
+    const rule = "図（構成図・フロー図）は markdown のコードブロックではなく";
+    expect(text).toContain(rule);
+    expect(text).toContain("図にならずコードとして表示される");
+    // 依頼ひな形（``` で囲まれた部分）の中にも入っている
+    const tmpl = text.slice(text.indexOf("依頼文のひな形"));
+    expect(tmpl).toContain('kind: "mermaid"');
+    expect(tmpl).toContain("コードブロック");
+  });
+
   it("最終 report_result の response の見出し", () => {
     expect(text).toContain("## 何が実装されたか");
     expect(text).toContain("## 試し方");
