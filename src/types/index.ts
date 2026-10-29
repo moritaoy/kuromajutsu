@@ -2,6 +2,19 @@
 // Kuromajutsu 共通型定義
 // ============================================================
 
+import type {
+  GateChange,
+  GateCheck,
+  GateResult,
+  HumanReview,
+  Phase,
+  ValidationIssue,
+  Workspace,
+  WorkspaceConfig,
+} from "./workspace.js";
+
+export * from "./workspace.js";
+
 // --------------------------------------------------
 // Provider（Agent 実行基盤）
 // --------------------------------------------------
@@ -37,6 +50,8 @@ export interface GroupDefinition {
   parentGroupId?: string;
   /** Orchestrator Agent ID（Magentic モードの親グループで設定） */
   orchestratorAgentId?: string;
+  /** 所属する Workspace ID（Workspace の Magentic 親グループで設定。§13） */
+  workspaceId?: string;
 }
 
 // --------------------------------------------------
@@ -190,6 +205,8 @@ export interface MagenticConfig {
   maxIterations: number;
   /** 現在の反復回数 */
   currentIteration: number;
+  /** Orchestrator プロンプトの末尾に連結する追記（Workspace の注入ブロック・再開プロンプト。§13.8.2） */
+  promptAppendix?: string;
 }
 
 // --------------------------------------------------
@@ -208,6 +225,17 @@ export interface ScheduledStep {
   status: "pending" | "in_progress" | "completed" | "skipped";
   /** 依存する stepId の配列（省略時は依存なし = 即時実行可能） */
   dependsOn?: string[];
+  // --- Workspace（§13）で追加するフィールド（すべて optional。後方互換） ---
+  /** 所属するフェーズ ID */
+  phaseId?: string;
+  /** 作業 or ゲート（省略時は work） */
+  kind?: "work" | "gate";
+  /** 完了定義（DoD） */
+  doneCriteria?: string[];
+  /** kind: "gate" のときのチェック項目 */
+  checks?: GateCheck[];
+  /** kind: "gate" のときの不合格時の方針 */
+  onFail?: { action: "rework"; maxRetries: number };
 }
 
 /** タスク台帳: Orchestrator のタスク分析結果 */
@@ -227,6 +255,8 @@ export interface TaskLedger {
   plan: string[];
   /** 構造化された作業予定（role 割り当て・依存関係付き） */
   scheduledSteps?: ScheduledStep[];
+  /** フェーズ定義（Workspace のみ。§13.3.2） */
+  phases?: Phase[];
   /** 更新日時（ISO 8601） */
   updatedAt: string;
 }
@@ -403,6 +433,8 @@ export interface AppConfig {
   agent: AgentConfig;
   log: LogConfig;
   roles: RoleDefinition[];
+  /** Workspace 設定（省略可。§13 / §9.2） */
+  workspace?: WorkspaceConfig;
 }
 
 // --------------------------------------------------
@@ -433,7 +465,23 @@ export type ServerEvent =
   | { type: "agent:status_update"; data: Partial<AgentState> & { agentId: string } }
   | { type: "agent:completed"; data: AgentState }
   | { type: "agent:result_reported"; data: AgentResult }
-  | { type: "config:updated"; data: AppConfig };
+  | { type: "config:updated"; data: AppConfig }
+  | { type: "workspace:created"; data: Workspace }
+  | { type: "workspace:updated"; data: Workspace }
+  | { type: "workspace:plan_generating"; data: { workspaceId: string; revision: number; message?: string } }
+  | { type: "workspace:plan_ready"; data: { workspaceId: string; revision: number; validation: ValidationIssue[] } }
+  | { type: "workspace:plan_failed"; data: { workspaceId: string; message: string } }
+  | { type: "workspace:phase_planned"; data: { workspaceId: string; phaseId: string; addedSteps: ScheduledStep[] } }
+  | {
+      type: "workspace:replanned";
+      data: { workspaceId: string; added: ScheduledStep[]; changed: ScheduledStep[]; removed: string[] };
+    }
+  | { type: "workspace:gate_result"; data: { workspaceId: string; gateResult: GateResult } }
+  | { type: "workspace:gate_retry_exceeded"; data: { workspaceId: string; gateId: string } }
+  | { type: "workspace:human_review_requested"; data: { workspaceId: string; review: HumanReview } }
+  | { type: "workspace:human_review_resolved"; data: { workspaceId: string; review: HumanReview } }
+  | { type: "workspace:resumed"; data: { workspaceId: string; reason: string; orchestratorAgentId: string } }
+  | { type: "workspace:irregular"; data: { workspaceId: string; change: GateChange } };
 
 /** クライアント → サーバー イベント */
 export type ClientEvent =

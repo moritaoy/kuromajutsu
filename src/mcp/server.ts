@@ -10,6 +10,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppConfig } from "../types/index.js";
 import type { AgentManager } from "../agent/manager.js";
 import { registerTools } from "./tools/index.js";
+import type { WorkspaceService } from "../workspace/service.js";
 
 // ------------------------------------------------------------
 // MCP Instructions — セッションのシステムプロンプトに自動注入される
@@ -76,6 +77,7 @@ kuromajutsu（別名: 黒魔術）は、複数のサブ Agent を並列・直列
 export function createMcpServer(
   config: AppConfig,
   manager: AgentManager,
+  workspaceService?: WorkspaceService,
 ): McpServer {
   const server = new McpServer(
     {
@@ -88,7 +90,7 @@ export function createMcpServer(
   );
 
   // ツールを登録
-  registerTools(server, config, manager);
+  registerTools(server, config, manager, workspaceService);
 
   return server;
 }
@@ -110,6 +112,7 @@ export async function startMcpServer(server: McpServer): Promise<void> {
 export function createMcpHttpHandler(
   config: AppConfig,
   manager: AgentManager,
+  workspaceService?: WorkspaceService,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const sessions = new Map<string, StreamableHTTPServerTransport>();
 
@@ -153,7 +156,7 @@ export function createMcpHttpHandler(
     };
 
     // このセッション用の McpServer を作成しツールを登録
-    const server = createMcpServer(config, manager);
+    const server = createMcpServer(config, manager, workspaceService);
     await server.connect(transport);
 
     await transport.handleRequest(req, res);

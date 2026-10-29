@@ -149,6 +149,34 @@ describe("run_magentic", () => {
     expect(magenticConfig?.maxIterations).toBe(10);
   });
 
+  it("availableRoles 省略時の既定から planner（Workspace 専用）も除外されること", () => {
+    const cfg = createTestConfig({
+      roles: [
+        ...createTestConfig().roles,
+        {
+          id: "planner",
+          name: "計画立案者",
+          description: "計画を作る",
+          model: "opus",
+          systemPrompt: "Plan.",
+          healthCheckPrompt: "OK",
+        },
+      ],
+    });
+    const mgr = new AgentManager(cfg);
+
+    const result = handleRunMagentic(cfg, mgr, {
+      description: "test",
+      task: "task",
+      completionCriteria: "criteria",
+      scope: "scope",
+    });
+
+    expect(result).not.toHaveProperty("isError");
+    const magenticConfig = mgr.getMagenticConfig(JSON.parse(result.content[0].text).groupId);
+    expect(magenticConfig?.availableRoles).toEqual(["impl-code"]);
+  });
+
   it("availableRoles 省略時に orchestrator 以外の全ロールがデフォルト設定されること", () => {
     const multiRoleConfig = createTestConfig({
       roles: [

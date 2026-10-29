@@ -15,8 +15,10 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { AgentManager } from "../agent/manager.js";
 import { isAgentProviderId } from "../agent/providers/index.js";
 import type { AppConfig, ServerEvent, ClientEvent } from "../types/index.js";
-import { writeFileSync } from "node:fs";
-import { stringify as stringifyYaml } from "yaml";
+import type { WorkspaceService } from "../workspace/service.js";
+import { handleWorkspaceApi } from "./api/workspaces.js";
+import { existsSync, writeFileSync } from "node:fs";
+import { isMap, isSeq, parseDocument, stringify as stringifyYaml } from "yaml";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -43,11 +45,13 @@ export type McpHttpHandler = (
  * 全クライアントにリアルタイムでブロードキャストする。
  *
  * @param mcpHttpHandler - MCP Streamable HTTP ハンドラー（省略時は /mcp 無効）
+ * @param workspaceService - Workspace サービス（省略時は /api/workspaces 無効。§13）
  */
 export function startDashboardServer(
   config: AppConfig,
   manager: AgentManager,
   mcpHttpHandler?: McpHttpHandler,
+  workspaceService?: WorkspaceService,
 ): Server {
   const port = config.dashboard.port;
   const publicDir = resolve(__dirname, "public");
@@ -56,7 +60,7 @@ export function startDashboardServer(
   // HTTP サーバー
   // --------------------------------------------------
   const server = createServer((req, res) => {
-    handleRequest(req, res, publicDir, mcpHttpHandler).catch((err) => {
+    handleRequest(req, res, publicDir, mcpHttpHandler, workspaceService).catch((err) => {
       console.error("[dashboard] リクエスト処理エラー:", err);
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "text/plain" });
@@ -72,7 +76,7 @@ export function startDashboardServer(
 
   wss.on("connection", (ws: WebSocket) => {
     // 初期データ送信
-    sendInitialState(ws, manager, config);
+    sendInitialState(ws, manager, config, workspaceService);
 
     // クライアントからのイベント受信
     ws.on("message", (data: Buffer | string) => {
@@ -86,7 +90,7 @@ export function startDashboardServer(
   });
 
   // AgentManager のイベントを全クライアントにブロードキャスト
-  setupBroadcast(wss, manager);
+  setupBroadcast(wss, manager, workspaceService);
 
   server.listen(port, () => {
     console.error(
@@ -108,6 +112,7 @@ export function startDashboardServer(
 function setupBroadcast(
   wss: WebSocketServer,
   manager: AgentManager,
+  workspaceService?: WorkspaceService,
 ): void {
   const broadcast = (event: ServerEvent) => {
     const message = JSON.stringify(event);
@@ -169,7 +174,33 @@ function setupBroadcast(
   manager.on("config:updated", (data) =>
     broadcast({ type: "config:updated", data }),
   );
+
+  // Workspace イベント（§13.9.2）
+  if (workspaceService) {
+    for (const type of WORKSPACE_EVENT_TYPES) {
+      workspaceService.on(type, (data) =>
+        broadcast({ type, data } as ServerEvent),
+      );
+    }
+  }
 }
+
+/** Workspace サービスが emit し、そのまま ServerEvent として配信するイベント */
+const WORKSPACE_EVENT_TYPES = [
+  "workspace:created",
+  "workspace:updated",
+  "workspace:plan_generating",
+  "workspace:plan_ready",
+  "workspace:plan_failed",
+  "workspace:phase_planned",
+  "workspace:replanned",
+  "workspace:gate_result",
+  "workspace:gate_retry_exceeded",
+  "workspace:human_review_requested",
+  "workspace:human_review_resolved",
+  "workspace:resumed",
+  "workspace:irregular",
+] as const;
 
 // --------------------------------------------------
 // 初期状態送信
@@ -183,6 +214,7 @@ function sendInitialState(
   ws: WebSocket,
   manager: AgentManager,
   config: AppConfig,
+  workspaceService?: WorkspaceService,
 ): void {
   // 1. サーバー起動通知（利用可能モデル一覧を含む）
   sendEvent(ws, {
@@ -234,6 +266,13 @@ function sendInitialState(
       }
     }
   }
+
+  // 7. Workspace の一覧を再送（古い順に送り、クライアントが作成順に積めるようにする）
+  if (workspaceService) {
+    for (const workspace of [...workspaceService.list()].reverse()) {
+      sendEvent(ws, { type: "workspace:created", data: workspace });
+    }
+  }
 }
 
 // --------------------------------------------------
@@ -265,19 +304,12 @@ function handleClientEvent(
       // 職種設定を更新
       Object.assign(config.roles[roleIndex], updates);
 
-      // kuromajutsu.config.yaml に書き戻し
+      // kuromajutsu.config.yaml に書き戻し（他の設定・コメントは保持する）
       try {
         const configPath =
           process.env["KUROMAJUTSU_CONFIG"] ??
           resolve(process.cwd(), "kuromajutsu.config.yaml");
-        const yamlContent = stringifyYaml({
-          dashboard: config.dashboard,
-          ...(config.providers ? { providers: config.providers } : {}),
-          agent: config.agent,
-          log: config.log,
-          roles: config.roles,
-        });
-        writeFileSync(configPath, yamlContent, "utf-8");
+        writeRoleUpdate(configPath, config, id, updates);
       } catch (err) {
         console.error("[dashboard] 設定ファイルの書き込みに失敗:", err);
       }
@@ -296,6 +328,60 @@ function handleClientEvent(
       break;
     }
   }
+}
+
+/**
+ * 設定ファイルの職種 `roleId` だけを更新して書き戻す。
+ * 既存ファイルを YAML ドキュメントとして読み、`workspace` / `providers` などの
+ * 他の設定やコメントはそのまま残す。ファイルが無い / 解析できない場合のみ
+ * 設定全体を書き出す。
+ */
+function writeRoleUpdate(
+  configPath: string,
+  config: AppConfig,
+  roleId: string,
+  updates: Record<string, unknown>,
+): void {
+  if (existsSync(configPath)) {
+    const doc = parseDocument(readFileSync(configPath, "utf-8"));
+    if (doc.errors.length === 0) {
+      const roles = doc.get("roles");
+      if (isSeq(roles)) {
+        const node = roles.items.find(
+          (item) => isMap(item) && item.get("id") === roleId,
+        );
+        if (isMap(node)) {
+          for (const [key, value] of Object.entries(updates)) {
+            if (value !== undefined) node.set(key, value);
+          }
+        } else {
+          const role = config.roles.find((r) => r.id === roleId);
+          if (role) roles.add(doc.createNode(role));
+        }
+        writeFileSync(configPath, String(doc), "utf-8");
+        return;
+      }
+      if (doc.contents === null || isMap(doc.contents)) {
+        // roles が無い設定ファイル: roles のみ追加する
+        doc.set("roles", doc.createNode(config.roles));
+        writeFileSync(configPath, String(doc), "utf-8");
+        return;
+      }
+    }
+  }
+
+  writeFileSync(
+    configPath,
+    stringifyYaml({
+      dashboard: config.dashboard,
+      ...(config.providers ? { providers: config.providers } : {}),
+      agent: config.agent,
+      log: config.log,
+      ...(config.workspace ? { workspace: config.workspace } : {}),
+      roles: config.roles,
+    }),
+    "utf-8",
+  );
 }
 
 // --------------------------------------------------
@@ -323,6 +409,7 @@ async function handleRequest(
   res: ServerResponse,
   publicDir: string,
   mcpHttpHandler?: McpHttpHandler,
+  workspaceService?: WorkspaceService,
 ): Promise<void> {
   const url = req.url ?? "/";
 
@@ -334,6 +421,14 @@ async function handleRequest(
       res.writeHead(501, { "Content-Type": "text/plain" });
       res.end("MCP HTTP transport not configured");
     }
+    return;
+  }
+
+  // Workspace API（§13.9.1）
+  if (
+    workspaceService &&
+    (await handleWorkspaceApi(req, res, workspaceService))
+  ) {
     return;
   }
 

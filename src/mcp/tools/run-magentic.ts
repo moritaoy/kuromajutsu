@@ -45,8 +45,9 @@ export function handleRunMagentic(
   }
 
   // 2. availableRoles の検証
+  // 既定では orchestrator と planner（Workspace 専用ロール）を除く
   const availableRoles = args.availableRoles ?? config.roles
-    .filter((r) => r.id !== "orchestrator")
+    .filter((r) => r.id !== "orchestrator" && r.id !== "planner")
     .map((r) => r.id);
 
   for (const roleId of availableRoles) {

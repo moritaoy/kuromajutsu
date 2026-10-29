@@ -6,7 +6,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { DEFAULT_PROVIDER_ID, isAgentProviderId } from "../agent/providers/index.js";
-import type { AppConfig, RoleDefinition } from "../types/index.js";
+import type { AppConfig, RoleDefinition, WorkspaceConfig } from "../types/index.js";
+import {
+  DEFAULT_WORKSPACE_CONFIG,
+  buildCommandPolicy,
+} from "../workspace/gate-commands.js";
 
 /** ビルトインデフォルト値 */
 const DEFAULTS: AppConfig = {
@@ -20,6 +24,7 @@ const DEFAULTS: AppConfig = {
     level: "info",
   },
   roles: [],
+  workspace: DEFAULT_WORKSPACE_CONFIG,
 };
 
 /**
@@ -60,6 +65,7 @@ export function loadConfig(configPath?: string): AppConfig {
       ...fileConfig.log,
     },
     roles: normalizeRoles(fileConfig.roles ?? DEFAULTS.roles),
+    workspace: normalizeWorkspaceConfig(fileConfig.workspace),
   };
   if (fileConfig.providers) {
     config.providers = fileConfig.providers;
@@ -91,4 +97,55 @@ function normalizeRoles(roles: RoleDefinition[]): RoleDefinition[] {
     }
     return { ...role, provider };
   });
+}
+
+/**
+ * workspace 設定をデフォルトとディープマージして検証する（§9.2）。
+ * `gateCommands.deny` の正規表現が不正な場合はエラー（起動時に報告する）。
+ */
+function normalizeWorkspaceConfig(file: Partial<WorkspaceConfig> | undefined | null): WorkspaceConfig {
+  const defaults = DEFAULT_WORKSPACE_CONFIG.gateCommands;
+  const gc = (file?.gateCommands ?? {}) as Partial<WorkspaceConfig["gateCommands"]>;
+
+  const strings = (key: "deny" | "allow"): string[] => {
+    const v = gc[key];
+    if (v == null) return [...defaults[key]];
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) {
+      throw new Error(`[config] workspace.gateCommands.${key} は文字列の配列で指定してください`);
+    }
+    return [...v];
+  };
+  const positive = (key: "timeout_ms" | "maxOutput_bytes"): number => {
+    const v = gc[key];
+    if (v == null) return defaults[key];
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) {
+      throw new Error(`[config] workspace.gateCommands.${key} は正の数で指定してください`);
+    }
+    return v;
+  };
+
+  const allow = strings("allow");
+  if (allow.length > 0 && allow.every((a) => a.trim() === "")) {
+    throw new Error(
+      "[config] workspace.gateCommands.allow が空文字・空白のみです（許可リストとして無効。使わない場合は省略するか [] にしてください）",
+    );
+  }
+
+  const workspace: WorkspaceConfig = {
+    gateCommands: {
+      deny: strings("deny"),
+      allow,
+      timeout_ms: positive("timeout_ms"),
+      maxOutput_bytes: positive("maxOutput_bytes"),
+    },
+  };
+
+  try {
+    buildCommandPolicy(workspace);
+  } catch (e) {
+    throw new Error(
+      `[config] workspace.gateCommands.deny: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  return workspace;
 }
