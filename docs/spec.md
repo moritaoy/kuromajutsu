@@ -487,9 +487,17 @@ Magentic モードの台帳（Ledger）を更新する。Orchestrator Agent が�
 - ゲート（`kind: "gate"`）の変更・削除・緩和は、`irregular: true` と `reason` が無ければ拒否する（`GATE_CHANGE_NOT_ALLOWED`）。受理した場合は `GateChange` を記録し、`workspace:irregular` を配信する
 - ゲートの `status` を `update_ledger` から `completed` / `skipped` にすることはできない。最終ゲートの削除と人間レビューの省略は `irregular` を付けても拒否する（`GATE_PROTECTED`）
 - 追加・変更されたゲートの `command` が禁止パターンに当たる場合は拒否する（`GATE_COMMAND_DENIED`、§13.5.3）
+- `scheduledSteps` に同じ `stepId` が 2 つ以上あれば拒否する（`DUPLICATE_STEP_ID`。重複した Step で検証をすり抜けられないようにするため）
+- `phases` が次のいずれかに当たる場合は拒否する（`INVALID_PHASES`。メッセージに原因を含める）
+  - フェーズ ID の重複、承認済みフェーズの削除
+  - 既存フェーズの `fix` / `parentPhaseId` / `final` の書き換え。承認済みフェーズでは `planning` の書き換えも不可（修正が要るときは修正フェーズを追加する）
+  - 追加するフェーズを `final` にする、または `final` フェーズを `phases` の最後以外に置く
+  - 追加するフェーズに `name` / `goal` が無い、追加する非 `final` フェーズに出口ゲート（`kind: "gate"` の Step）が無い
+  - Step の `phaseId` が存在しないフェーズを指す、新しい Step に `phaseId` が無い
+  - 修正フェーズの参照不整合（`fix` と `parentPhaseId` の片方だけ、親フェーズ・原因フェーズの不在、`failedGateId` が親フェーズのゲートでない、`triageStepId` が親フェーズの work Step でない。§13.3.2）
 - `deferred` フェーズへの手順の追加は `workspace:phase_planned`、その他の手順の変更は `workspace:replanned` として通知する
 
-**エラーコード（Workspace グループ）:** `GATE_CHANGE_NOT_ALLOWED`, `GATE_PROTECTED`, `GATE_COMMAND_DENIED`
+**エラーコード（Workspace グループ）:** `GATE_CHANGE_NOT_ALLOWED`, `GATE_PROTECTED`, `GATE_COMMAND_DENIED`, `DUPLICATE_STEP_ID`, `INVALID_PHASES`
 
 #### 2.2.12 `run_gate_check` — ゲートの `command` チェックを実行する
 
@@ -533,9 +541,13 @@ Workspace（§13）のゲートが持つ `command` チェックを **サーバ�
 }
 ```
 
-`gateStatus` は `pending` / `failed` / `auto_passed` / `passed` のいずれか（§13.3.4）。`retryLimitExceeded` が `true` の場合は、作業を打ち切って `report_result`（`status: success`、`summary`: 「差し戻し上限超過で一時停止」）で終了するよう指示する `instruction` フィールドが付く（§13.5.6）。
+`gateStatus` は `pending` / `failed` / `auto_passed` / `passed` のいずれか（§13.3.4）。`failedAttempts` は保存された値ではなく、最後の「指示を付けて再試行」より後の attempt を末尾から見た、連続する不合格の数（§13.5.6）。`retryLimitExceeded` が `true` の場合は、作業を打ち切って `report_result`（`status: success`、`summary`: 「差し戻し上限超過で一時停止」）で終了するよう指示する `instruction` フィールドが付く（§13.5.6）。
 
-**エラーコード:** `GROUP_NOT_FOUND`, `NOT_WORKSPACE_GROUP`, `WORKSPACE_NOT_RUNNING`, `GATE_NOT_FOUND`, `NO_COMMAND_CHECK`, `COMMAND_DENIED`
+**エラーコード:** `GROUP_NOT_FOUND`, `NOT_WORKSPACE_GROUP`, `WORKSPACE_NOT_RUNNING`, `GATE_NOT_FOUND`, `GATE_ALREADY_PASSED`, `DUPLICATE_STEP_ID`, `NO_COMMAND_CHECK`, `COMMAND_DENIED`
+
+`DUPLICATE_STEP_ID`: 台帳（Task Ledger）に同じ `stepId` の Step が 2 件以上あるとき（ゲートの引き当てと、ゲートの状態の更新で検出する）。`update_ledger` で `stepId` を 1 つにしてから呼び直す。`report_gate_result`（§2.2.13）も同じ。
+
+`GATE_ALREADY_PASSED`: 合格済み（`passed`）のゲートには結果を記録できない。合格済みの成果物を直すときは、修正フェーズを追加し、その出口ゲートで再チェックする（人間レビュー済みなら再レビュー。§13.5.6）。`report_gate_result`（§2.2.13）も同じ。
 
 **内部動作:**
 1. グループが Workspace に紐付き、Workspace が `running` であることを検証する
@@ -573,7 +585,7 @@ Workspace のゲートの `agent-review` チェックの結果を記録する。
 }
 ```
 
-**エラーコード:** `GROUP_NOT_FOUND`, `NOT_WORKSPACE_GROUP`, `WORKSPACE_NOT_RUNNING`, `GATE_NOT_FOUND`, `CHECK_NOT_FOUND`, `CHECK_METHOD_MISMATCH`
+**エラーコード:** `GROUP_NOT_FOUND`, `NOT_WORKSPACE_GROUP`, `WORKSPACE_NOT_RUNNING`, `GATE_NOT_FOUND`, `GATE_ALREADY_PASSED`, `DUPLICATE_STEP_ID`（台帳に重複する `stepId` があるとき。§2.2.12）, `CHECK_NOT_FOUND`, `CHECK_METHOD_MISMATCH`
 
 `command` チェックの結果は `run_gate_check` でのみ記録でき、`human` チェックの結果は人間レビューでのみ決まる。これらを指定すると `CHECK_METHOD_MISMATCH` を返す。
 
@@ -1236,6 +1248,7 @@ interface HealthCheckResult {
 - MCPサーバーが内蔵 HTTP サーバーで配信する（デフォルトポート: `9696`「くろくろ」）
 - React で構築する SPA（Single Page Application）
 - WebSocket でサーバーとリアルタイム双方向通信する
+- WebSocket 接続は、`Origin` ヘッダーがあるとき `Host` と一致する（loopback 同士はポート一致）場合だけ受け付け、不一致は 403 で拒否する。`Origin` ヘッダー無しの接続は許可する（規則は §13.9.1）
 - ダークテーマベースの魔術的なデザイン
 
 ### 8.2 画面構成
@@ -1516,8 +1529,8 @@ roles:
 ```
 
 **`workspace.gateCommands` の規則（§13.5.3）:**
-- `deny` は既定の禁止パターン（ルート削除、`sudo`、`git push`、`git reset --hard`、`curl|wget ... | sh`、`shutdown` / `reboot`）に加えて禁止する正規表現。コマンド文字列全体に対して照合する
-- `allow` が空でないとき、ゲートの `command` は連結子（`;` `&&` `||` `|`）で分割した各セグメントがすべて、いずれかの `allow` のプレフィックスで始まる必要がある（禁止パターンも引き続き適用）
+- `deny` は既定の禁止パターン（ルート削除、`sudo`、`git push`、`git reset --hard`、`curl|wget ... | sh`、`shutdown` / `reboot`）に加えて禁止する正規表現。コマンド文字列の全体と各セグメントの両方に対して照合する
+- `allow` が空でないとき、ゲートの `command` は連結子で分割した各セグメントがすべて、いずれかの `allow` のプレフィックスで始まる必要がある（禁止パターンも引き続き適用）。連結子は `;` `&&` `||` `|` `|&` 単独の `&` 改行で、リダイレクトの `&`（`2>&1` / `&>` / `>&`）は連結子として扱わない
 - 設定の検証エラー（正規表現として不正な `deny` など）は起動時に報告する
 
 ### 9.3 設定の読み込み優先順位
@@ -1763,6 +1776,7 @@ stateDiagram-v2
   [*] --> planning: 指示送信
   planning --> review: 計画生成完了
   planning --> failed: 計画生成に失敗
+  planning --> aborted: 中断（Planner を停止）
   review --> planning: 追加指示
   review --> running: 承認（検証エラー 0 件が条件）
   review --> aborted: 中断
@@ -1778,13 +1792,15 @@ stateDiagram-v2
 
 | 状態 | 意味 | 人の操作 |
 |---|---|---|
-| `planning` | Planner が計画（または再計画）を生成中 | 待つ |
+| `planning` | Planner が計画（または再計画）を生成中 | 待つ、中断 |
 | `review` | 計画ができた。人が読んで追加指示 / 承認する | 追加指示、承認、中断 |
 | `running` | Orchestrator が承認済みの計画を実行中 | 監視、中断 |
 | `waiting_human` | 人の判断待ち。Orchestrator プロセスは終了しており、人の操作で **新しい Orchestrator が再開する**（§13.8.4）。理由は 2 つ（下表） | レビュー、または再試行 / 中断 |
 | `done` | 最終ゲートに合格して完了 | レポートの確認 |
 | `failed` | 失敗して終了（理由は `statusReason`: 計画生成失敗 / `maxIterations` 超過 / Orchestrator 異常終了 / サーバー再起動） | 内容を確認し、必要なら新しい Workspace を作る |
 | `aborted` | 人が中断した | — |
+
+中断（`POST /api/workspaces/:id/abort`）は `planning` / `review` / `running` / `waiting_human` から行える（それ以外は 409）。`planning` 中の中断は、Planner Agent を kill し、計画生成用のグループ（`Workspace <id> 計画生成`）を削除してから `aborted`（`user_abort`）にする。`review` からは Agent を持たないため、状態を `aborted` にするだけである。`running` / `waiting_human` からの中断は §13.8.8 を参照。
 
 `done` / `failed` / `aborted` は終端状態であり、以降は遷移しない。
 
@@ -1936,8 +1952,12 @@ interface GateResult {
   phaseId: string;
   status: "pending" | "failed" | "auto_passed" | "waiting_human" | "passed";
   attempts: GateAttempt[];
-  /** D3: 人が「指示を付けて再試行」したときの指示。以後、failedAttempts は 0 から数え直す */
-  retryInstructions: { text: string; at: string }[];
+  /**
+   * D3: 人が「指示を付けて再試行」したときの指示。以後、差し戻し上限の判定は、この再試行より後の attempt だけを数える。
+   * `afterAttempt` は再試行の時点で最後だった attempt の番号。これより後の attempt だけを数える
+   * （無い場合は `at` と各 attempt の最初のチェックの時刻を比べる）。
+   */
+  retryInstructions: { text: string; at: string; afterAttempt?: number }[];
 }
 
 interface ReviewComment {
@@ -1978,6 +1998,14 @@ interface GateChange {
 | `auto_passed` | 自動チェックがすべて合格し、`human` チェックがある（人間レビュー資料の作成前） |
 | `waiting_human` | `request_human_review` 済みで、人の判断待ち |
 | `passed` | 自動チェックがすべて合格し、`human` チェックがない / 人が承認済み |
+
+**`failedAttempts`（差し戻し回数）** も保存せず、`GateResult` から導出する。
+
+1. 最後の `retryInstructions` より後の attempt だけを対象にする（`afterAttempt` より大きい `attempt` 番号。`afterAttempt` が無ければ、最初のチェックの時刻が `at` より後のもの）。再試行の指示が無ければすべての attempt が対象。
+2. 対象の attempt を **末尾（新しい方）から** 見て、不合格のチェックを 1 つ以上含む attempt の数を数える（`closedAt` が無くても不合格があれば数える）。
+3. 合格した attempt（`closedAt` があり、不合格のチェックが無い）に当たった時点で数えるのをやめる。まだ結果が揃っておらず不合格もない attempt は、数えずに読み飛ばす。
+
+つまり「最後の再試行指示より後の、連続する不合格の attempt の数」である。上限超過は、この数が `maxRetries + 1` に達し、**かつ** 現在の `GateResult.status` が `failed` のときに判定する（§13.5.6）。
 
 ### 13.4 計画の規則
 
@@ -2049,14 +2077,14 @@ interface GateChange {
 | パイプ実行 | `curl ... \| sh` / `wget ... \| sh`（`bash` / `zsh` 等へのパイプを含む） |
 | 電源操作 | `shutdown` / `reboot` |
 
-判定は、コマンド文字列をシェルの連結子（`;` `&&` `||` `|` `&` 改行。リダイレクトの `2>&1` などは除く）で分割した各セグメントと、パイプ全体（パイプ実行の判定用）に対して行う。
+判定は、コマンド文字列をシェルの連結子（`;` `&&` `||` `|` `|&` 単独の `&` 改行。リダイレクトの `&`（`2>&1` / `&>` / `>&`）は連結子として扱わない）で分割した各セグメントと、パイプ全体（パイプ実行の判定用）に対して行う。
 
 **設定（`workspace.gateCommands`、§9.2）:**
 
 | キー | 説明 |
 |---|---|
 | `deny` | 追加の禁止パターン（正規表現の文字列。コマンド文字列全体と各セグメントに対して照合する）。既定の禁止パターンに加算される |
-| `allow` | 指定すると **前方一致の許可リスト** に切り替わる（厳格運用向け）。連結子で分割した各セグメントがすべて、いずれかの許可プレフィックスで始まる必要がある。`$(` やバッククォートを含むコマンドは許可しない。許可リスト方式でも禁止パターンは引き続き適用される |
+| `allow` | 指定すると **前方一致の許可リスト** に切り替わる（厳格運用向け）。上記の連結子で分割した各セグメントがすべて、いずれかの許可プレフィックスで始まる必要がある。`$(` やバッククォートを含むコマンドは許可しない。許可リスト方式でも禁止パターンは引き続き適用される |
 | `timeout_ms` | 1 コマンドのタイムアウト（既定 `600000`）。超過時は SIGTERM、5 秒後に SIGKILL。`timedOut: true` で不合格として記録する |
 | `maxOutput_bytes` | stdout / stderr それぞれの取得上限（既定 `1048576`）。超過分は切り捨てる。記録・返却は末尾 4000 文字 |
 
@@ -2125,13 +2153,15 @@ Magentic では Orchestrator が実行中に計画を変えうる。変更の権
 | 前のフェーズの成果物（人間レビューで承認済み） | 修正フェーズを差し込み、人間の再レビューを付ける | 修正フェーズの出口を人間レビュー（元のゲートのレビュー観点を引き継ぐ）にする |
 
 3. 修正フェーズは、原因のあったフェーズを巻き戻すのではなく **追加** する（合格済みのフェーズやゲートの記録は残す）。完了後、不合格になったゲートを同じ条件で再チェックする。修正フェーズは `Phase.fix` と `Phase.parentPhaseId`（§13.3.2）を持つ。
-4. **差し戻し上限超過:** 同じゲートについて、初回のチェックと `maxRetries`（既定 2）回の再チェックがすべて不合格になった時点（= 不合格の attempt が `maxRetries + 1` 回に達した時点）で、自動では続けない。
+4. **差し戻し上限超過:** 同じゲートについて、初回のチェックと `maxRetries`（既定 2）回の再チェックがすべて不合格になった時点（= 不合格の attempt が `maxRetries + 1` 回に達し、かつ現在の `GateResult.status` が `failed` である時点）で、自動では続けない。
    - サーバーが `run_gate_check` / `report_gate_result` の返却値に `retryLimitExceeded: true` を入れ、Orchestrator に「作業を打ち切り、`report_result`（`status: success`、`summary`: 「差し戻し上限超過で一時停止」）で終了する」よう指示する。
    - サーバーは Workspace を `waiting_human`（`statusReason.code: "gate_retry_exceeded"`）にし、画面に **「ゲート不合格が続いています」パネル** を出す。パネルには、不合格のゲート、各 attempt の結果、Orchestrator の原因の切り分けの要約を表示する。
-   - 人は **「指示を付けて再試行」**（`POST /api/workspaces/:id/retry`。指示を Orchestrator に渡して再開する。そのゲートの `failedAttempts` は 0 に戻す）か **「中断」**（`POST /api/workspaces/:id/abort`）を選ぶ。
+   - 人は **「指示を付けて再試行」**（`POST /api/workspaces/:id/retry`。指示を Orchestrator に渡して再開する。サーバーは、開いている最後の attempt があれば閉じ、指示を `retryInstructions` に `afterAttempt`（その最後の attempt の番号。attempt が無ければ 0）付きで記録し、ゲートを `pending` に戻す。それより後の attempt だけを数えるため、そのゲートの失敗回数は 0 から数え直しになる）か **「中断」**（`POST /api/workspaces/:id/abort`）を選ぶ。
    - 再開は §13.8.4 と同じ仕組み（再開プロンプト）で行う。
 
 > attempt の数え方: ゲートの全自動チェックに結果が揃うと attempt が閉じる。閉じた attempt の後に新しいチェック結果が記録されると、次の attempt が始まる。
+>
+> 失敗回数（`failedAttempts`）は保存せず、最後の再試行指示より後の attempt を末尾から見て、連続する不合格の attempt の数として導出する。合格した attempt（`closedAt` ありで全チェック合格）に当たった時点で数えるのをやめる。詳細は §13.3.4。
 
 #### 13.5.7 承認時の検証（Validation）
 
@@ -2205,6 +2235,8 @@ interface ReviewSection {
 | `decisions` | 判断してほしいこと | `human` のチェック項目と、AI が置いた前提 |
 
 差し戻し後の版（`version` ≥ 2）では、先頭に `previousFeedback`（前回の指摘への対応）を置く。
+
+**図の書き方:** 構成図などの図は、markdown のコードブロックではなく `kind: "mermaid"` の節にする（コードブロックにすると図にならず、コードとして表示される）。
 
 **自由な表現:** `kind: "html"` と `kind: "file"` を使うと、**モック HTML をそのまま見せる** など、標準の節に収まらない自由な表現ができる。`html` は本文に自己完結の HTML を書き、`file` は作業ディレクトリ内の既存ファイル（例: `src/dashboard/public/mock/workspace.html`）を指す。
 
@@ -2321,7 +2353,7 @@ sequenceDiagram
 
 #### 13.8.5 差し戻し上限超過での停止と再開
 
-§13.5.6 のとおり、`retryLimitExceeded` を受けた Orchestrator が終了し、サーバーが `waiting_human`（`gate_retry_exceeded`）にする。人の「指示を付けて再試行」で、§13.8.4 と同じ手順（旧 Orchestrator の終了確認 → 新 Orchestrator を再開プロンプトで起動）を行う。人の指示は `GateResult.retryInstructions` に記録し、再開プロンプトに含める。
+§13.5.6 のとおり、`retryLimitExceeded` を受けた Orchestrator が終了し、サーバーが `waiting_human`（`gate_retry_exceeded`）にする。人の「指示を付けて再試行」で、§13.8.4 と同じ手順（旧 Orchestrator の終了確認 → 新 Orchestrator を再開プロンプトで起動）を行う。人の指示は `GateResult.retryInstructions` に（`afterAttempt` 付きで）記録し、再開プロンプトに含める。再試行後の失敗回数は、この指示より後の attempt だけを数えて導出する（§13.3.4）。
 
 #### 13.8.6 再開プロンプトの内容
 
@@ -2344,20 +2376,22 @@ sequenceDiagram
 |---|---|
 | 承認 | 対象ゲートは合格済み。次のフェーズ（`deferred` なら直前計画から）へ進む |
 | 差し戻し | そのフェーズに「レビュー指摘の反映」手順を追加して実行する → ゲートの自動チェックをやり直す → text-writer に **次の版**（`previousFeedback` 付き）のレビュー資料を作らせる → `request_human_review` を呼んで終了する |
-| 上限超過後の再試行 | 人の指示を踏まえて原因の切り分けからやり直す。そのゲートの失敗回数は 0 に戻っている |
+| 上限超過後の再試行 | 人の指示を踏まえて原因の切り分けからやり直す。そのゲートの失敗回数は、再試行の指示より後の attempt だけを数えるため 0 から数え直しになる |
 
 #### 13.8.7 `maxIterations` の算出
 
 Planner の出力を受け取ったとき、サーバーが次の式で WorkPlan の `maxIterations` を算出する。承認時に UI で変更できる。
 
 ```
-maxIterations = max(10,
-    固定フェーズの手順数
-  + 未決定フェーズの数 × 3          // 直前計画で増える手順の見込み
-  + ゲートの数
-  + ゲートの数 × 1                  // 想定する差し戻し回数（ゲートごとに 1 回）
+maxIterations = max(12,
+    固定フェーズの手順数（work Step）× 2     // 委任 + 評価
+  + 未決定フェーズの数 × 4                  // 直前計画で増える手順の見込み
+  + Σ ゲートごとに (2 + maxRetries)         // 実行 + 想定する差し戻しと再チェック。maxRetries は onFail.maxRetries（未指定は既定の 2）
+  + human チェックを含むゲートの数 × 2      // 人間レビューの停止・再開のたびの再計画
 )
 ```
+
+根拠: 実機の小さな計画（手順 3、ゲート 4、人間ゲート 1）で、旧式の上限 11 に対して 10 反復を消費した。1 手順あたり委任と評価で 2 反復、ゲートごとに実行と差し戻しの余地、人間レビューの停止・再開のたびの再計画が要るため、余裕を持たせた。
 
 人間レビューによる停止・再開をまたいでも、反復は通算で数える（§13.8.4）。
 
@@ -2402,6 +2436,23 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 
 不正な状態での操作（例: `running` の Workspace への `approve`）は 409 を返す。
 
+エラーは `{ "error": "<コード>", "message": "<説明>" }` の JSON で返す（検証エラーの 422 は `issues` を含む）。
+
+| ステータス | `error` | 契機 |
+|---|---|---|
+| 400 | `INVALID_INSTRUCTION` / `INVALID_WORKSPACE_PATH` / `INVALID_REQUEST` / `INVALID_JSON` | 指示が空・作業ディレクトリが不正・body の項目が不正・body が JSON として不正 |
+| 403 | `FORBIDDEN_ORIGIN` | `Origin` ヘッダーが `Host` と一致しない（下記）。CORS ヘッダーは返さない |
+| 404 | `NOT_FOUND` | Workspace・ゲート・イレギュラー・レビュー資料・API のパスが見つからない。操作系のパス（`/:id/abort` など）に未対応のメソッドを送った場合もここに落ちる |
+| 405 | `METHOD_NOT_ALLOWED` | 一覧（`/api/workspaces`）・単体（`/:id`）・レビュー資料（`/:id/reviews/*`）の 3 種のパスに対する未対応のメソッド（操作系のパスは 404） |
+| 409 | `INVALID_STATE` | 現在の状態では行えない操作 |
+| 413 | `PAYLOAD_TOO_LARGE` | リクエスト body が 1 MiB を超える |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | `Content-Type` が `application/json` でない（単純リクエストによる CSRF の対策）。`POST /api/workspaces`・`replan`・`gates/:gateId/review` は body が空でも `Content-Type: application/json` が必須。`approve` / `retry` は body が無いときだけ `Content-Type` を要求しない（body があれば必須）。`abort` と `irregulars/:id/ack` は body も `Content-Type` も読まず、Origin の検査だけを行う |
+| 422 | `VALIDATION_FAILED` | `approve` の承認時検証にエラーがある（`issues` を含む） |
+| 500 | `INTERNAL_ERROR` | 想定外のエラー |
+| 503 | `PLANNER_UNAVAILABLE` / `ORCHESTRATOR_UNAVAILABLE` | `planner` / `orchestrator` 職種が未定義、または Planner / Orchestrator を起動できない |
+
+**cross-origin 対策:** この API は Agent を起動できるため、`Origin` ヘッダーがある場合は `Host` と一致するときだけ受け付ける。`Origin` のホストが loopback（`localhost` / `127.0.0.1` / `[::1]`）のときは、ポートが `Host` と一致すれば許可する。`Origin` ヘッダーの無いリクエスト（curl など）は許可する。
+
 #### 13.9.2 WebSocket イベント（サーバー → クライアント）
 
 接続時の初期状態（`sendInitialState`）には Workspace の一覧を含める。
@@ -2424,6 +2475,8 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 | `workspace:irregular` | ゲート変更（変更前後・理由）。UI は必ず警告表示する | `update_ledger` がゲート変更を受理した時 |
 
 クライアント → サーバーの WebSocket イベントは追加しない（操作は HTTP API で行う）。
+
+ダッシュボードの全 WebSocket 接続（Workspace 専用ではない）を、HTTP API と同じ Origin 規則（§13.9.1）で検査し、不一致は 403 で接続を拒否する（ブラウザ以外からの `Origin` ヘッダー無しの接続は許可する）。
 
 ### 13.10 画面設計
 
@@ -2462,7 +2515,7 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 |---|---|---|
 | 最上部 | 何が実装されたか | できるようになったこと |
 | 最上部 | 試し方 | 確認手順 |
-| 最上部 | 変更したファイル | `editedFiles` / `createdFiles` の集約 |
+| 最上部 | 変更したファイル | `editedFiles` / `createdFiles` の集約。集約時に正規化する: `workspacePath` 配下の絶対パスは相対パスに揃える（`workspacePath` の realpath でも比較する）、重複を除く、`createdFiles` にあるファイルは `editedFiles` から除く、`workspacePath` の外のパスは絶対パスのまま残す |
 | 最上部 | 人が判断したこと | 人間レビューの結果と、反映した指摘 |
 | 最上部 | 完了条件の達成 | `spec.completion` ごとの達成状況 |
 | 最上部 | 確認しておくと良いこと | 未確認のイレギュラー、AI が置いた前提 |
