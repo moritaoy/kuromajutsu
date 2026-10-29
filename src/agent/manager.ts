@@ -127,6 +127,11 @@ export class AgentManager extends EventEmitter {
       agentIds: [],
       parentGroupId,
     };
+    // Workspace の Magentic グループの子グループは、同じ Workspace に紐付ける（§13.8）
+    const parentWorkspaceId = parentGroupId
+      ? this.groups.get(parentGroupId)?.workspaceId
+      : undefined;
+    if (parentWorkspaceId !== undefined) group.workspaceId = parentWorkspaceId;
 
     this.groups.set(group.id, group);
     this.emit("group:created", group);
@@ -270,6 +275,11 @@ export class AgentManager extends EventEmitter {
       timeout_ms?: number;
       /** 指定時は buildFullPrompt をスキップし、この文字列をそのまま使用（Magentic Orchestrator 用） */
       prebuiltFullPrompt?: string;
+      /**
+       * true のとき、Magentic グループに Orchestrator が既に居ても Orchestrator プロンプトで起動する
+       * （Workspace の再開で 2 人目の Orchestrator を同じグループに起動するため）
+       */
+      asMagenticOrchestrator?: boolean;
     },
   ): AgentState {
     // グループの存在・アクティブチェック
@@ -321,7 +331,13 @@ export class AgentManager extends EventEmitter {
     // AgentExecutor でプロセス起動
     const fullPrompt =
       options?.prebuiltFullPrompt ??
-      this.resolveFullPrompt(role, agentId, groupId, prompt);
+      this.resolveFullPrompt(
+        role,
+        agentId,
+        groupId,
+        prompt,
+        options?.asMagenticOrchestrator === true,
+      );
     const timeout_ms =
       options?.timeout_ms ?? this.config.agent.defaultTimeout_ms ?? undefined;
 
@@ -495,7 +511,7 @@ export class AgentManager extends EventEmitter {
     groupId: string,
     orchestratorRole: RoleDefinition,
     prompt: string,
-    options?: { timeout_ms?: number },
+    options?: { timeout_ms?: number; workingDirectory?: string },
   ): AgentState {
     const group = this.groups.get(groupId);
     if (!group) {
@@ -510,6 +526,8 @@ export class AgentManager extends EventEmitter {
 
     const agent = this.startAgent(groupId, orchestratorRole, prompt, {
       timeout_ms: options?.timeout_ms,
+      workingDirectory: options?.workingDirectory,
+      asMagenticOrchestrator: true,
     });
 
     group.orchestratorAgentId = agent.agentId;
@@ -675,7 +693,7 @@ export class AgentManager extends EventEmitter {
       "---",
     ].join("\n");
 
-    return [
+    const layers = [
       role.systemPrompt,
       metadataBlock,
       toolGuideBlock,
@@ -683,7 +701,10 @@ export class AgentManager extends EventEmitter {
       completionBlock,
       scopeBlock,
       paramsBlock,
-    ].join("\n\n");
+    ];
+    // Workspace の注入ブロック・再開プロンプトなど（末尾に連結）
+    if (config.promptAppendix) layers.push(config.promptAppendix);
+    return layers.join("\n\n");
   }
 
   /** Agent の状態を取得する（存在しなければ undefined） */
@@ -706,6 +727,29 @@ export class AgentManager extends EventEmitter {
     }
 
     return agents;
+  }
+
+  /**
+   * Agent を停止する。存在し queued / running のときは true。
+   * running はプロセスに SIGTERM（5 秒後 SIGKILL）を送る。
+   * queued はプロセスが無いので failed にする。
+   * それ以外（`resultReported` など）は状態を変えず false を返すが、プロセスが残っていれば止める
+   * （report_result を呼んだあとも CLI プロセスが生きていることがある。`executor.kill` はプロセスが無ければ何もしない）。
+   */
+  killAgent(agentId: string): boolean {
+    const agent = this.agents.get(agentId);
+    if (!agent) return false;
+    if (agent.status === "running") {
+      this.executor.kill(agentId);
+      return true;
+    }
+    if (agent.status === "queued") {
+      this.executor.kill(agentId);
+      this.updateAgentState(agentId, { status: "failed" });
+      return true;
+    }
+    this.executor.kill(agentId);
+    return false;
   }
 
   /** 現在実行中（queued + running）の Agent 数を取得する */
@@ -1391,10 +1435,15 @@ export class AgentManager extends EventEmitter {
     agentId: string,
     groupId: string,
     userPrompt: string,
+    asMagenticOrchestrator = false,
   ): string {
     const magenticConfig = this.magenticConfigs.get(groupId);
     const group = this.groups.get(groupId);
-    if (group?.mode === "magentic" && magenticConfig && !group.orchestratorAgentId) {
+    if (
+      group?.mode === "magentic" &&
+      magenticConfig &&
+      (!group.orchestratorAgentId || asMagenticOrchestrator)
+    ) {
       return this.buildMagenticOrchestratorPrompt(role, agentId, groupId, magenticConfig);
     }
     return this.buildFullPrompt(role, agentId, groupId, userPrompt);

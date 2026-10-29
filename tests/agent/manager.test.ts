@@ -1703,3 +1703,189 @@ describe("AgentManager — ヘルスチェック結果管理", () => {
     expect(all).toHaveLength(2);
   });
 });
+
+// ==================================================
+// killAgent
+// ==================================================
+
+describe("AgentManager — killAgent", () => {
+  function setup() {
+    const config = createTestConfig();
+    const manager = new AgentManager(config);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockKill = (manager as any).executor.kill as ReturnType<typeof vi.fn>;
+    const group = manager.createGroup("kill");
+    const agent = manager.startAgent(group.id, config.roles[0], "p");
+    return { manager, mockKill, agent };
+  }
+
+  it("running の Agent は executor.kill を呼び true を返す", () => {
+    const { manager, mockKill, agent } = setup();
+    manager.updateAgentState(agent.agentId, { status: "running" });
+
+    expect(manager.killAgent(agent.agentId)).toBe(true);
+    expect(mockKill).toHaveBeenCalledWith(agent.agentId);
+    // 状態の遷移はプロセス終了のハンドラーに任せる
+    expect(manager.getAgent(agent.agentId)?.status).toBe("running");
+  });
+
+  it("queued の Agent は failed にして true を返す", () => {
+    const { manager, agent } = setup();
+    expect(manager.getAgent(agent.agentId)?.status).toBe("queued");
+
+    expect(manager.killAgent(agent.agentId)).toBe(true);
+    expect(manager.getAgent(agent.agentId)?.status).toBe("failed");
+  });
+
+  it("完了済みの Agent は状態を変えず false を返し、プロセスが残っていれば止める（executor.kill を呼ぶ）", () => {
+    const { manager, mockKill, agent } = setup();
+    manager.updateAgentState(agent.agentId, { status: "running" });
+    manager.updateAgentState(agent.agentId, { status: "completed" });
+
+    expect(manager.killAgent(agent.agentId)).toBe(false);
+    expect(manager.getAgent(agent.agentId)?.status).toBe("completed");
+    expect(mockKill).toHaveBeenCalledWith(agent.agentId);
+  });
+
+  it("report_result 済み（resultReported）でもプロセスが残っていれば止める", () => {
+    const { manager, mockKill, agent } = setup();
+    manager.updateAgentState(agent.agentId, { status: "running" });
+    manager.reportResult(agent.agentId, { status: "success", summary: "s", response: "r" });
+    mockKill.mockClear();
+
+    expect(manager.killAgent(agent.agentId)).toBe(false);
+    expect(manager.getAgent(agent.agentId)?.status).toBe("resultReported");
+    expect(mockKill).toHaveBeenCalledWith(agent.agentId);
+  });
+
+  it("存在しない Agent は false を返す", () => {
+    const { manager, mockKill } = setup();
+    expect(manager.killAgent("agent-unknown")).toBe(false);
+    expect(mockKill).not.toHaveBeenCalled();
+  });
+});
+
+// ==================================================
+// Workspace 連携（docs/spec.md §13.8）
+// ==================================================
+
+describe("AgentManager — Workspace 連携", () => {
+  const orchestratorRole = {
+    id: "orchestrator",
+    name: "オーケストレーター",
+    description: "タスクを自律管理する",
+    model: "claude-4-sonnet",
+    systemPrompt: "You are an orchestrator.",
+    healthCheckPrompt: "OK",
+  };
+
+  function setup() {
+    const cfg = createTestConfig({ roles: [...createTestConfig().roles, orchestratorRole] });
+    const manager = new AgentManager(cfg);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const execute = (manager as any).executor.execute as ReturnType<typeof vi.fn>;
+    const magenticCfg: MagenticConfig = {
+      task: "タスク",
+      completionCriteria: "完了条件",
+      scope: "範囲",
+      availableRoles: ["impl-code"],
+      maxIterations: 3,
+      currentIteration: 0,
+    };
+    return { manager, execute, magenticCfg, cfg };
+  }
+
+  it("promptAppendix があれば Orchestrator プロンプトの末尾に連結される", () => {
+    const { manager, magenticCfg } = setup();
+    const group = manager.createGroup("M", "magentic");
+    const prompt = manager.buildMagenticOrchestratorPrompt(orchestratorRole, "o-1", group.id, {
+      ...magenticCfg,
+      promptAppendix: "【追記ブロック】ここが末尾",
+    });
+    expect(prompt.endsWith("【追記ブロック】ここが末尾")).toBe(true);
+    expect(prompt.indexOf("【実行パラメータ】")).toBeLessThan(prompt.indexOf("【追記ブロック】"));
+  });
+
+  it("promptAppendix が無ければ従来と同じプロンプト", () => {
+    const { manager, magenticCfg } = setup();
+    const group = manager.createGroup("M", "magentic");
+    const prompt = manager.buildMagenticOrchestratorPrompt(orchestratorRole, "o-1", group.id, magenticCfg);
+    expect(prompt).not.toContain("undefined");
+    const withEmpty = manager.buildMagenticOrchestratorPrompt(orchestratorRole, "o-1", group.id, {
+      ...magenticCfg,
+      promptAppendix: "",
+    });
+    expect(withEmpty).toBe(prompt);
+  });
+
+  it("startMagenticOrchestrator は Orchestrator プロンプト（注入ブロック込み）で起動し、workingDirectory を渡す", () => {
+    const { manager, execute, magenticCfg } = setup();
+    const group = manager.createGroup("M", "magentic");
+    manager.setMagenticConfig(group.id, { ...magenticCfg, promptAppendix: "【注入ブロック】" });
+
+    manager.startMagenticOrchestrator(group.id, orchestratorRole, "タスク本文", {
+      workingDirectory: "/tmp/work",
+    });
+
+    const [, opts] = execute.mock.calls[0];
+    expect(opts.prompt).toContain("You are an orchestrator.");
+    expect(opts.prompt).toContain("【Orchestrator ツール使用ガイド】");
+    expect(opts.prompt.endsWith("【注入ブロック】")).toBe(true);
+    expect(opts.workingDirectory).toBe("/tmp/work");
+  });
+
+  it("再開: 同じグループに 2 人目の Orchestrator を起動でき、orchestratorAgentId は新しい Agent になる", () => {
+    const { manager, execute, magenticCfg } = setup();
+    const group = manager.createGroup("M", "magentic");
+    manager.setMagenticConfig(group.id, { ...magenticCfg, promptAppendix: "【1 人目】" });
+    const first = manager.startMagenticOrchestrator(group.id, orchestratorRole, "t");
+
+    manager.setMagenticConfig(group.id, { ...magenticCfg, promptAppendix: "【2 人目（再開）】" });
+    const second = manager.startMagenticOrchestrator(group.id, orchestratorRole, "t");
+
+    expect(second.agentId).not.toBe(first.agentId);
+    expect(manager.getGroup(group.id)!.orchestratorAgentId).toBe(second.agentId);
+    const prompt2 = execute.mock.calls[1][1].prompt as string;
+    expect(prompt2).toContain("【Orchestrator ツール使用ガイド】");
+    expect(prompt2.endsWith("【2 人目（再開）】")).toBe(true);
+    expect(prompt2).toContain(second.agentId);
+  });
+
+  it("Orchestrator が居るグループへの通常の startAgent は従来どおり汎用プロンプト", () => {
+    const { manager, execute, magenticCfg } = setup();
+    const group = manager.createGroup("M", "magentic");
+    manager.setMagenticConfig(group.id, magenticCfg);
+    manager.startMagenticOrchestrator(group.id, orchestratorRole, "t");
+
+    manager.startAgent(group.id, createTestConfig().roles[0], "通常タスク");
+    const prompt = execute.mock.calls[1][1].prompt as string;
+    expect(prompt).toContain("通常タスク");
+    expect(prompt).not.toContain("【Orchestrator ツール使用ガイド】");
+  });
+
+  it("startAgent の asMagenticOrchestrator: true で Orchestrator プロンプトになる", () => {
+    const { manager, execute, magenticCfg } = setup();
+    const group = manager.createGroup("M", "magentic");
+    manager.setMagenticConfig(group.id, magenticCfg);
+    manager.startMagenticOrchestrator(group.id, orchestratorRole, "t");
+
+    manager.startAgent(group.id, orchestratorRole, "t", { asMagenticOrchestrator: true });
+    expect(execute.mock.calls[1][1].prompt).toContain("【Orchestrator ツール使用ガイド】");
+  });
+
+  it("createGroup: 親グループの workspaceId を子グループに引き継ぐ", () => {
+    const { manager } = setup();
+    const parent = manager.createGroup("親", "magentic");
+    parent.workspaceId = "ws-1-aaaa";
+
+    const child = manager.createGroup("子", "concurrent", parent.id);
+    expect(child.workspaceId).toBe("ws-1-aaaa");
+  });
+
+  it("createGroup: 親に workspaceId が無ければ子にも付かない / 親が存在しなくても作成できる", () => {
+    const { manager } = setup();
+    const parent = manager.createGroup("親", "magentic");
+    expect(manager.createGroup("子", "concurrent", parent.id).workspaceId).toBeUndefined();
+    expect(manager.createGroup("孤児", "concurrent", "grp-nope").workspaceId).toBeUndefined();
+  });
+});

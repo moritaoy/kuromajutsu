@@ -2,9 +2,12 @@
 // update_ledger ツール テスト
 // ============================================================
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { AgentManager } from "../../../src/agent/manager.js";
-import { handleUpdateLedger } from "../../../src/mcp/tools/update-ledger.js";
+import { handleUpdateLedger, phaseSchema, scheduledStepSchema } from "../../../src/mcp/tools/update-ledger.js";
+import { createRunHarness, type RunHarness } from "../../workspace/harness.js";
+import { makeFixPlan } from "../../workspace/fixtures.js";
+import { toScheduledSteps } from "../../../src/workspace/plan.js";
 import type {
   AppConfig,
   MagenticConfig,
@@ -633,5 +636,272 @@ describe("update_ledger", () => {
       }).content[0].text,
     );
     expect(data).not.toHaveProperty("nextRunnableSteps");
+  });
+});
+
+// ==================================================
+// Workspace グループでの update_ledger（docs/spec.md §2.2.11 / §13.5.5）
+// ==================================================
+
+describe("update_ledger（Workspace グループ）", () => {
+  let h: RunHarness;
+  let groupId: string;
+  let workspaceId: string;
+
+  const facts = { given: ["f"], toInvestigate: [], toDerive: [], assumptions: [] };
+  const parse = (r: { content: { text: string }[] }) => JSON.parse(r.content[0].text);
+  const currentSteps = (): ScheduledStep[] => structuredClone(h.steps(groupId));
+  const ledgerOf = () => h.manager.getLedger(groupId)!.taskLedger!;
+
+  function updateTask(over: Record<string, unknown>) {
+    return handleUpdateLedger(
+      h.manager,
+      { groupId, type: "task", facts, plan: ["計画"], ...over } as Parameters<typeof handleUpdateLedger>[1],
+      h.service,
+    );
+  }
+
+  beforeEach(() => {
+    h = createRunHarness();
+    const r = h.running();
+    groupId = r.groupId;
+    workspaceId = r.id;
+  });
+  afterEach(() => h.cleanup());
+
+  it("ゲートを completed にする更新は GATE_PROTECTED で拒否され、台帳は変わらない", () => {
+    const before = currentSteps();
+    const steps = currentSteps();
+    steps.find((s) => s.stepId === "gate-P3")!.status = "completed";
+    const res = updateTask({ scheduledSteps: steps });
+    expect(res).toHaveProperty("isError", true);
+    expect(parse(res)).toMatchObject({ error: true, code: "GATE_PROTECTED" });
+    expect(ledgerOf().scheduledSteps).toEqual(before);
+  });
+
+  it("進捗台帳の更新に含めたゲートの完了も GATE_PROTECTED（進捗台帳も更新されない）", () => {
+    const steps = currentSteps();
+    steps.find((s) => s.stepId === "gate-P3")!.status = "completed";
+    const res = handleUpdateLedger(
+      h.manager,
+      {
+        groupId,
+        type: "progress",
+        isRequestSatisfied: { reason: "r", answer: false },
+        isInLoop: { reason: "r", answer: false },
+        isProgressBeingMade: { reason: "r", answer: true },
+        nextAction: { reason: "r", answer: "a" },
+        instruction: { reason: "r", answer: "i" },
+        iteration: 1,
+        scheduledSteps: steps,
+      },
+      h.service,
+    );
+    expect(parse(res).code).toBe("GATE_PROTECTED");
+    expect(h.manager.getLedger(groupId)!.progressLedger).toBeUndefined();
+  });
+
+  it("ゲートの変更は irregular なしで GATE_CHANGE_NOT_ALLOWED、irregular + reason なら受理して gateChanges を記録する", () => {
+    const steps = currentSteps();
+    steps.find((s) => s.stepId === "gate-P3")!.checks = [{ text: "ビルドのみ", method: "command", command: "npm run build" }];
+
+    const ng = updateTask({ scheduledSteps: structuredClone(steps) });
+    expect(parse(ng).code).toBe("GATE_CHANGE_NOT_ALLOWED");
+    expect(h.store.get(workspaceId)!.gateChanges).toEqual([]);
+
+    const ok = updateTask({ scheduledSteps: steps, irregular: true, reason: "全テストは重い" });
+    expect(ok).not.toHaveProperty("isError");
+    expect(ledgerOf().scheduledSteps!.find((s) => s.stepId === "gate-P3")!.checks![0].command).toBe("npm run build");
+    expect(h.store.get(workspaceId)!.gateChanges).toHaveLength(1);
+    expect(h.store.get(workspaceId)!.gateChanges[0]).toMatchObject({ gateId: "gate-P3", reason: "全テストは重い" });
+  });
+
+  it("最終ゲートの削除は irregular でも GATE_PROTECTED", () => {
+    const steps = currentSteps().filter((s) => s.stepId !== "gate-final");
+    const res = updateTask({ scheduledSteps: steps, irregular: true, reason: "不要" });
+    expect(parse(res).code).toBe("GATE_PROTECTED");
+  });
+
+  it("追加するゲートの command が禁止パターンなら GATE_COMMAND_DENIED", () => {
+    const steps = currentSteps();
+    steps.push({
+      stepId: "gate-x",
+      role: "code-review",
+      description: "x",
+      status: "pending",
+      phaseId: "P3",
+      kind: "gate",
+      checks: [{ text: "push", method: "command", command: "git push origin main" }],
+    });
+    expect(parse(updateTask({ scheduledSteps: steps })).code).toBe("GATE_COMMAND_DENIED");
+  });
+
+  it("phases が不正なら INVALID_PHASES", () => {
+    const phases = structuredClone(ledgerOf().phases!).filter((p) => p.id !== "P3");
+    expect(parse(updateTask({ phases })).code).toBe("INVALID_PHASES");
+  });
+
+  it("deferred フェーズへの追加: dependsOn を実効依存に正規化して保存し、nextRunnableSteps も正規化後で算出する", () => {
+    const steps = currentSteps();
+    steps.push({
+      stepId: "i1",
+      role: "impl-code",
+      description: "実装",
+      status: "pending",
+      phaseId: "P2",
+      kind: "work",
+      doneCriteria: ["できた"],
+      dependsOn: ["s2"], // 別フェーズへの依存は落ちる
+    });
+    const res = updateTask({ scheduledSteps: steps });
+    const body = parse(res);
+    expect(body.status).toBe("updated");
+    expect(ledgerOf().scheduledSteps!.find((s) => s.stepId === "i1")!.dependsOn).toEqual(["gate-P1"]);
+    // gate-P1 が未完了なので i1 は着手できない（s1 だけが着手可能）
+    expect(body.nextRunnableSteps.map((s: { stepId: string }) => s.stepId)).toEqual(["s1"]);
+  });
+
+  it("phases（修正フェーズの追加）を台帳に保存する", () => {
+    const fix = makeFixPlan();
+    const res = updateTask({ phases: fix.phases, scheduledSteps: toScheduledSteps(fix) });
+    expect(res).not.toHaveProperty("isError");
+    expect(ledgerOf().phases!.map((p) => p.id)).toContain("FX1");
+  });
+
+  it("scheduledSteps / phases を含まない task 更新でも phases を失わない", () => {
+    const res = updateTask({ facts: { ...facts, given: ["更新"] }, plan: ["新しい計画"] });
+    expect(res).not.toHaveProperty("isError");
+    expect(ledgerOf().plan).toEqual(["新しい計画"]);
+    expect(ledgerOf().phases!.map((p) => p.id)).toEqual(["P1", "P2", "P3", "PF"]);
+    expect(ledgerOf().scheduledSteps).toHaveLength(h.steps(groupId).length);
+  });
+
+  it("進捗台帳の更新（scheduledSteps 付き）でも phases を保持し、ゲートの status はサーバー管理の値のまま", () => {
+    const steps = currentSteps();
+    steps.find((s) => s.stepId === "s1")!.status = "in_progress";
+    steps.find((s) => s.stepId === "gate-P1")!.status = "in_progress";
+    const res = handleUpdateLedger(
+      h.manager,
+      {
+        groupId,
+        type: "progress",
+        isRequestSatisfied: { reason: "r", answer: false },
+        isInLoop: { reason: "r", answer: false },
+        isProgressBeingMade: { reason: "r", answer: true },
+        nextAction: { reason: "r", answer: "a" },
+        instruction: { reason: "r", answer: "i" },
+        iteration: 1,
+        scheduledSteps: steps,
+      },
+      h.service,
+    );
+    expect(res).not.toHaveProperty("isError");
+    expect(ledgerOf().phases).toHaveLength(4);
+    expect(ledgerOf().scheduledSteps!.find((s) => s.stepId === "s1")!.status).toBe("in_progress");
+    expect(ledgerOf().scheduledSteps!.find((s) => s.stepId === "gate-P1")!.status).toBe("pending");
+  });
+
+  it("scheduledSteps / phases を含まない進捗台帳の更新は検証せずに通る", () => {
+    const res = handleUpdateLedger(
+      h.manager,
+      {
+        groupId,
+        type: "progress",
+        isRequestSatisfied: { reason: "r", answer: false },
+        isInLoop: { reason: "r", answer: false },
+        isProgressBeingMade: { reason: "r", answer: true },
+        nextAction: { reason: "r", answer: "a" },
+        instruction: { reason: "r", answer: "i" },
+        iteration: 1,
+      },
+      h.service,
+    );
+    expect(res).not.toHaveProperty("isError");
+  });
+
+  it("停止した Workspace の台帳更新は WORKSPACE_NOT_RUNNING", () => {
+    h.service.abort(workspaceId);
+    expect(parse(updateTask({ scheduledSteps: currentSteps() })).code).toBe("WORKSPACE_NOT_RUNNING");
+  });
+
+  it("Workspace に紐付かないグループは従来どおり（irregular / reason は無視。検証しない）", () => {
+    const group = h.manager.createGroup("通常の Magentic", "magentic");
+    const steps: ScheduledStep[] = [
+      { stepId: "g1", role: "impl-code", description: "ゲートっぽいもの", status: "completed", kind: "gate" },
+    ];
+    const res = handleUpdateLedger(
+      h.manager,
+      { groupId: group.id, type: "task", facts, plan: ["p"], scheduledSteps: steps, irregular: true, reason: "x" },
+      h.service,
+    );
+    expect(res).not.toHaveProperty("isError");
+    expect(h.manager.getLedger(group.id)!.taskLedger!.scheduledSteps).toEqual(steps);
+  });
+
+  it("Workspace のグループなのにサービスが渡されなければ fail-closed（NOT_WORKSPACE_GROUP。台帳は変わらない）", () => {
+    const steps = currentSteps();
+    steps.find((s) => s.stepId === "gate-P3")!.status = "completed";
+    const before = currentSteps();
+    const res = handleUpdateLedger(h.manager, { groupId, type: "task", facts, plan: ["p"], scheduledSteps: steps });
+    expect(res).toHaveProperty("isError", true);
+    expect(parse(res).code).toBe("NOT_WORKSPACE_GROUP");
+    expect(ledgerOf().scheduledSteps).toEqual(before);
+    const progress = handleUpdateLedger(h.manager, {
+      groupId,
+      type: "progress",
+      isRequestSatisfied: { reason: "r", answer: false },
+      isInLoop: { reason: "r", answer: false },
+      isProgressBeingMade: { reason: "r", answer: true },
+      nextAction: { reason: "r", answer: "a" },
+      instruction: { reason: "r", answer: "i" },
+      iteration: 1,
+    });
+    expect(parse(progress).code).toBe("NOT_WORKSPACE_GROUP");
+  });
+
+  it("stepId が重複する更新は DUPLICATE_STEP_ID（human を外した弱いコピーでの検証すり抜けを防ぐ）。台帳は変わらない", () => {
+    const before = currentSteps();
+    for (const position of ["head", "tail"] as const) {
+      const steps = currentSteps();
+      const weak = structuredClone(steps.find((s) => s.stepId === "gate-P1")!);
+      weak.checks = [{ text: "仕様書が矛盾していない", method: "agent-review" }];
+      if (position === "head") steps.unshift(weak);
+      else steps.push(weak);
+      const res = updateTask({ scheduledSteps: steps, irregular: true, reason: "x" });
+      expect(res).toHaveProperty("isError", true);
+      expect(parse(res)).toMatchObject({ error: true, code: "DUPLICATE_STEP_ID" });
+    }
+    expect(ledgerOf().scheduledSteps).toEqual(before);
+    expect(ledgerOf().scheduledSteps!.find((s) => s.stepId === "gate-P1")!.checks).toHaveLength(2);
+    expect(h.store.get(workspaceId)!.gateChanges).toEqual([]);
+  });
+
+  it("承認済みフェーズへの fix / planning の書き換えは INVALID_PHASES", () => {
+    const phases = structuredClone(ledgerOf().phases!);
+    phases.find((p) => p.id === "P2")!.planning = "fixed";
+    expect(parse(updateTask({ phases })).code).toBe("INVALID_PHASES");
+  });
+
+  it("フェーズを id だけで再送しても、name / goal / planning / notes は現行値のまま（既定値で上書きしない）", () => {
+    const original = structuredClone(ledgerOf().phases!);
+    const phases = original.map((p) => ({ id: p.id, ...(p.final ? { final: true } : {}) }));
+    const res = updateTask({ phases });
+    expect(res).not.toHaveProperty("isError");
+    expect(ledgerOf().phases).toEqual(original);
+  });
+
+  it("新規 Step に phaseId が無ければ INVALID_PHASES", () => {
+    const steps = currentSteps();
+    steps.push({ stepId: "free", role: "impl-code", description: "x", status: "pending" });
+    expect(parse(updateTask({ scheduledSteps: steps })).code).toBe("INVALID_PHASES");
+  });
+
+  it("入力スキーマ: onFail.maxRetries は 0 以上の整数、phases は id 以外を省略できる", () => {
+    const okStep = { stepId: "s", role: "r", description: "d", status: "pending" as const };
+    expect(scheduledStepSchema.safeParse({ ...okStep, onFail: { action: "rework", maxRetries: 0 } }).success).toBe(true);
+    expect(scheduledStepSchema.safeParse({ ...okStep, onFail: { action: "rework", maxRetries: -1 } }).success).toBe(false);
+    expect(scheduledStepSchema.safeParse({ ...okStep, onFail: { action: "rework", maxRetries: 1.5 } }).success).toBe(false);
+    const parsed = phaseSchema.parse({ id: "P1" });
+    expect(parsed).toEqual({ id: "P1" }); // 既定値で埋めない
   });
 });
