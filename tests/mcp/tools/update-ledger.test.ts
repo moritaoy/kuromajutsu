@@ -886,6 +886,72 @@ describe("update_ledger（Workspace グループ）", () => {
     });
   });
 
+  describe("stepStatuses（台帳の現在の status。サーバー同期を含む）", () => {
+    const progressArgs = {
+      isRequestSatisfied: { reason: "r", answer: false },
+      isInLoop: { reason: "r", answer: false },
+      isProgressBeingMade: { reason: "r", answer: true },
+      nextAction: { reason: "r", answer: "a" },
+      instruction: { reason: "r", answer: "i" },
+      iteration: 1,
+    };
+    const statusOf = (body: { stepStatuses: { stepId: string; status: string }[] }, stepId: string) =>
+      body.stepStatuses.find((x) => x.stepId === stepId)?.status;
+
+    function startSub(stepId: string) {
+      const child = h.manager.createGroup("サブ", "concurrent", groupId);
+      const role = h.config.roles.find((r) => r.id === "research")!;
+      return h.manager.startAgent(child.id, role, "やって", { stepId });
+    }
+
+    it("task の応答に全手順の { stepId, status } が付く（scheduledSteps 省略時も、台帳の現在値）", () => {
+      const body = parse(updateTask({}));
+      expect(body.stepStatuses).toEqual(currentSteps().map((x) => ({ stepId: x.stepId, status: x.status })));
+      expect(statusOf(body, "s1")).toBe("pending");
+    });
+
+    it("progress の応答にも付く。サーバーが同期した status（起動 → in_progress、成功報告 → completed）が反映される", () => {
+      const agent = startSub("s1");
+      const afterStart = parse(handleUpdateLedger(h.manager, { groupId, type: "progress", ...progressArgs }, h.service));
+      expect(statusOf(afterStart, "s1")).toBe("in_progress");
+
+      h.finish(agent.agentId, "success");
+      const afterDone = parse(handleUpdateLedger(h.manager, { groupId, type: "progress", ...progressArgs, iteration: 2 }, h.service));
+      expect(statusOf(afterDone, "s1")).toBe("completed");
+    });
+
+    it("古い scheduledSteps（s1 が pending）を送っても、応答の stepStatuses は completed のまま（巻き戻らず、台帳も completed）", () => {
+      h.finish(startSub("s1").agentId, "success");
+      const stale = currentSteps();
+      stale.find((x) => x.stepId === "s1")!.status = "pending";
+      const body = parse(
+        handleUpdateLedger(h.manager, { groupId, type: "progress", ...progressArgs, iteration: 2, scheduledSteps: stale }, h.service),
+      );
+      expect(statusOf(body, "s1")).toBe("completed");
+      expect(ledgerOf().scheduledSteps!.find((x) => x.stepId === "s1")!.status).toBe("completed");
+      expect(body.nextRunnableSteps.map((x: { stepId: string }) => x.stepId)).not.toContain("s1");
+    });
+
+    it("Workspace に紐付かないグループの応答には stepStatuses を付けない", () => {
+      const group = h.manager.createGroup("通常の Magentic", "magentic");
+      const body = parse(
+        handleUpdateLedger(
+          h.manager,
+          {
+            groupId: group.id,
+            type: "task",
+            facts,
+            plan: ["p"],
+            scheduledSteps: [{ stepId: "a", role: "impl-code", description: "d", status: "pending" }],
+          },
+          h.service,
+        ),
+      );
+      expect(body).toHaveProperty("nextRunnableSteps");
+      expect(body).not.toHaveProperty("stepStatuses");
+    });
+  });
+
   it("停止した Workspace の台帳更新は WORKSPACE_NOT_RUNNING", () => {
     h.service.abort(workspaceId);
     expect(parse(updateTask({ scheduledSteps: currentSteps() })).code).toBe("WORKSPACE_NOT_RUNNING");

@@ -91,6 +91,25 @@ describe("run_agents", () => {
     expect(data.agents[1].role).toBe("code-review");
   });
 
+  it("正常系: stepId が AgentState に入る（未指定の Agent には付かない）", () => {
+    const group = manager.createGroup("test");
+
+    const result = handleRunAgents(config, manager, {
+      groupId: group.id,
+      agents: [
+        { role: "impl-code", prompt: "タスク1", stepId: "s2" },
+        { role: "code-review", prompt: "タスク2" },
+      ],
+    });
+
+    expect(result).not.toHaveProperty("isError");
+    const data = JSON.parse(result.content[0].text);
+    const a = manager.getAgent(data.agents[0].agentId);
+    const b = manager.getAgent(data.agents[1].agentId);
+    expect(a?.stepId).toBe("s2");
+    expect(b?.stepId).toBeUndefined();
+  });
+
   it("異常系: agents 配列が空", () => {
     const group = manager.createGroup("test");
 

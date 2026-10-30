@@ -290,6 +290,28 @@ describe("AgentManager — Agent 基本管理", () => {
     expect(agent.createdFiles).toEqual([]);
   });
 
+  it("startAgent の stepId オプションが AgentState と agent:created イベントに入る", () => {
+    const group = manager.createGroup("test");
+    const created: Array<{ stepId?: string }> = [];
+    manager.on("agent:created", (a) => created.push(a));
+    const agent = manager.startAgent(group.id, config.roles[0], "p", { stepId: "s2" });
+    expect(agent.stepId).toBe("s2");
+    expect(created[0].stepId).toBe("s2");
+    // 未指定なら付かない
+    const plain = manager.startAgent(group.id, config.roles[0], "p");
+    expect(plain.stepId).toBeUndefined();
+  });
+
+  it("startAgents のタスクの stepId が AgentState に入る", () => {
+    const group = manager.createGroup("test");
+    const agents = manager.startAgents(group.id, [
+      { role: "impl-code", prompt: "a", stepId: "s1" },
+      { role: "impl-code", prompt: "b" },
+    ]);
+    expect(agents[0].stepId).toBe("s1");
+    expect(agents[1].stepId).toBeUndefined();
+  });
+
   it("Agent 起動時にユーザープロンプトが保存される", () => {
     const group = manager.createGroup("test");
     const agent = manager.startAgent(
@@ -890,6 +912,31 @@ describe("AgentManager — reportResult", () => {
     expect(result.groupId).toBe(group.id);
   });
 
+  it("結果登録で AgentResult に stepId が写る（agent:result_reported にも含まれる）", () => {
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(group.id, config.roles[0], "test", { stepId: "s3" });
+    manager.updateAgentState(agent.agentId, { status: "running" });
+    const reported: Array<{ stepId?: string }> = [];
+    manager.on("agent:result_reported", (r) => reported.push(r));
+
+    const result = manager.reportResult(agent.agentId, {
+      status: "success",
+      summary: "ok",
+      response: "ok",
+    });
+    expect(result.stepId).toBe("s3");
+    expect(reported[0].stepId).toBe("s3");
+  });
+
+  it("stepId の無い Agent の AgentResult には stepId が付かない", () => {
+    const group = manager.createGroup("test");
+    const agent = manager.startAgent(group.id, config.roles[0], "test");
+    manager.updateAgentState(agent.agentId, { status: "running" });
+    const result = manager.reportResult(agent.agentId, { status: "success", summary: "ok", response: "ok" });
+    expect(result.stepId).toBeUndefined();
+    expect("stepId" in result).toBe(false);
+  });
+
   it("結果登録でステータスが resultReported に遷移する", () => {
     const group = manager.createGroup("test");
     const agent = manager.startAgent(group.id, config.roles[0], "test");
@@ -1470,6 +1517,11 @@ describe("AgentManager — Magentic グループ管理", () => {
     expect(pre).not.toContain("必ず含めること");
     expect(pre).toContain("手順の status が変わったとき");
     expect(pre).toContain("変わっていなければ省略してよい");
+    // サーバー同期（起動で in_progress、成功報告で completed）と stepStatuses の使い方
+    expect(pre).toContain("サブ Agent の起動（in_progress）と成功報告（completed）で同期する");
+    expect(pre).toContain("update_ledger の応答の stepStatuses にある最新の status を使い、completed を戻さない");
+    expect(pre).toContain("台帳に追加してから `run_agents` を呼ぶ（台帳に無い stepId は同期されない）");
+    expect(normal).not.toContain("stepStatuses");
     // 通常は従来どおり
     expect(normal).toContain("scheduledSteps（重要）: 進捗更新と同時に");
     // 2（進捗）・3（リプラン）は残る

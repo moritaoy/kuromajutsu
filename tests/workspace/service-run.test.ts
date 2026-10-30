@@ -1416,6 +1416,388 @@ describe("WorkspaceService（実行系）", () => {
   // Orchestrator 完了の判定
   // ----------------------------------------------------
 
+  // ----------------------------------------------------
+  // Agent ↔ 手順（stepId）の台帳同期（§13.8.10）
+  // ----------------------------------------------------
+
+  describe("サブ Agent の起動 / 成功報告による step status の同期", () => {
+    /** 親グループの子グループ（concurrent）に stepId 付きで Agent を起動する */
+    function startSub(groupId: string, stepId: string | undefined, roleId = "research") {
+      const child = manager.createGroup("サブ", "concurrent", groupId);
+      const role = config.roles.find((r) => r.id === roleId)!;
+      return manager.startAgent(child.id, role, "やって", stepId !== undefined ? { stepId } : undefined);
+    }
+    const ledgerEvents = (groupId: string): (() => number) => {
+      let n = 0;
+      manager.on("group:ledger_updated", (l) => {
+        if (l.groupId === groupId) n += 1;
+      });
+      return () => n;
+    };
+
+    it("起動で pending の手順が in_progress になり group:ledger_updated が出る。台帳の他の項目は維持される", () => {
+      const { groupId } = running();
+      const before = manager.getLedger(groupId)!.taskLedger!;
+      const count = ledgerEvents(groupId);
+      startSub(groupId, "s1");
+      expect(count()).toBe(1);
+      expect(stepStatus(groupId, "s1")).toBe("in_progress");
+      expect(stepStatus(groupId, "s2")).toBe("pending");
+      const after = manager.getLedger(groupId)!.taskLedger!;
+      expect(after.facts).toEqual(before.facts);
+      expect(after.plan).toEqual(before.plan);
+      expect(after.phases).toEqual(before.phases);
+    });
+
+    it("Magentic 親グループ自身に直接起動した Agent も対象", () => {
+      const { groupId } = running();
+      const role = config.roles.find((r) => r.id === "research")!;
+      manager.startAgent(groupId, role, "やって", { stepId: "s1" });
+      expect(stepStatus(groupId, "s1")).toBe("in_progress");
+    });
+
+    it("成功報告（success）で completed になる", () => {
+      const { groupId } = running();
+      const agent = startSub(groupId, "s1");
+      finish(agent.agentId, "success");
+      expect(stepStatus(groupId, "s1")).toBe("completed");
+    });
+
+    it("failure では変えない（in_progress のまま。Orchestrator が判断する）", () => {
+      const { groupId } = running();
+      const agent = startSub(groupId, "s1");
+      finish(agent.agentId, "failure");
+      expect(stepStatus(groupId, "s1")).toBe("in_progress");
+    });
+
+    it("stepId の無い Agent は何も変えず、台帳の更新イベントも出さない", () => {
+      const { groupId } = running();
+      const count = ledgerEvents(groupId);
+      const agent = startSub(groupId, undefined);
+      finish(agent.agentId, "success");
+      expect(count()).toBe(0);
+      expect(steps(groupId).every((s) => s.status === "pending")).toBe(true);
+    });
+
+    it("台帳に無い stepId は何もしない", () => {
+      const { groupId } = running();
+      const count = ledgerEvents(groupId);
+      const agent = startSub(groupId, "no-such-step");
+      finish(agent.agentId, "success");
+      expect(count()).toBe(0);
+    });
+
+    it("ゲートの stepId を付けても変えない（agent-review のレビュー Agent など）", () => {
+      const { groupId } = running();
+      const count = ledgerEvents(groupId);
+      const agent = startSub(groupId, "gate-P1", "code-review");
+      expect(stepStatus(groupId, "gate-P1")).toBe("pending");
+      finish(agent.agentId, "success");
+      expect(stepStatus(groupId, "gate-P1")).toBe("pending");
+      expect(count()).toBe(0);
+    });
+
+    it("すでに in_progress / completed の手順は変えず、イベントも出さない（completed から戻さない）", () => {
+      const { groupId } = running();
+      const a = startSub(groupId, "s1");
+      finish(a.agentId, "success");
+      const count = ledgerEvents(groupId);
+      const b = startSub(groupId, "s1");
+      expect(stepStatus(groupId, "s1")).toBe("completed");
+      finish(b.agentId, "success");
+      expect(stepStatus(groupId, "s1")).toBe("completed");
+      expect(count()).toBe(0);
+    });
+
+    it("Orchestrator 自身は対象外", () => {
+      const { groupId, orchestratorId } = running();
+      const count = ledgerEvents(groupId);
+      finish(orchestratorId, "success");
+      expect(count()).toBe(0);
+    });
+
+    it("Workspace に紐付かないグループの Agent は対象外", () => {
+      const { groupId } = running();
+      const other = manager.createGroup("無関係", "concurrent");
+      const role = config.roles.find((r) => r.id === "research")!;
+      const count = ledgerEvents(groupId);
+      manager.startAgent(other.id, role, "やって", { stepId: "s1" });
+      expect(stepStatus(groupId, "s1")).toBe("pending");
+      expect(count()).toBe(0);
+    });
+
+    it("Orchestrator が後から同じ status を送っても差分（workspace:replanned）は出ない", () => {
+      const { groupId } = running();
+      const agent = startSub(groupId, "s1");
+      finish(agent.agentId, "success");
+      const incoming = structuredClone(steps(groupId));
+      incoming.find((s) => s.stepId === "s1")!.status = "completed";
+      incoming.find((s) => s.stepId === "s2")!.status = "in_progress";
+      const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incoming });
+      expect(out.scheduledSteps.find((s) => s.stepId === "s1")?.status).toBe("completed");
+      expect(eventsOf("workspace:replanned")).toEqual([]);
+    });
+
+    it("waiting_human（人間レビュー待ち）の間も同期する", () => {
+      const { id, groupId } = running();
+      const agent = startSub(groupId, "s1");
+      store.update(id, (w) => {
+        w.status = "waiting_human";
+      });
+      finish(agent.agentId, "success");
+      expect(stepStatus(groupId, "s1")).toBe("completed");
+    });
+
+    it("Workspace が done / aborted になった後は同期しない", () => {
+      const a = running();
+      const late = startSub(a.groupId, "s1");
+      service.abort(a.id);
+      const count = ledgerEvents(a.groupId);
+      finish(late.agentId, "success");
+      expect(stepStatus(a.groupId, "s1")).toBe("in_progress");
+      expect(count()).toBe(0);
+
+      const b = running();
+      const bAgent = startSub(b.groupId, "s1");
+      service.reportGateResult(b.groupId, "gate-final", 0, true);
+      finish(b.orchestratorId, "success", "## 何が実装されたか\nOK\n\n## 試し方\nnpm test\n\n## 確認しておくと良いこと\nなし", "完了");
+      expect(current(b.id).status).toBe("done");
+      const countB = ledgerEvents(b.groupId);
+      finish(bAgent.agentId, "success");
+      expect(stepStatus(b.groupId, "s1")).toBe("in_progress");
+      expect(countB()).toBe(0);
+    });
+
+    it("shutdown() で購読を外す（以後は同期しない）", () => {
+      const { groupId } = running();
+      service.shutdown();
+      startSub(groupId, "s1");
+      expect(stepStatus(groupId, "s1")).toBe("pending");
+    });
+
+    // ------------------------------------------------
+    // 巻き戻しの防止（サーバー同期で completed にした手順を、古い incoming で戻さない）
+    // ------------------------------------------------
+    describe("巻き戻しの防止", () => {
+      const statusIn = (out: { scheduledSteps: ScheduledStep[] }, stepId: string) =>
+        out.scheduledSteps.find((x) => x.stepId === stepId)?.status;
+      const incomingWith = (groupId: string, stepId: string, status: ScheduledStep["status"]): ScheduledStep[] => {
+        const incoming = structuredClone(steps(groupId));
+        incoming.find((x) => x.stepId === stepId)!.status = status;
+        return incoming;
+      };
+
+      it.each(["pending", "in_progress"] as const)("同期で completed になった手順に Orchestrator が %s を送っても completed が維持される", (status) => {
+        const { groupId } = running();
+        const agent = startSub(groupId, "s1");
+        finish(agent.agentId, "success");
+        expect(stepStatus(groupId, "s1")).toBe("completed");
+
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incomingWith(groupId, "s1", status) });
+        expect(statusIn(out, "s1")).toBe("completed");
+        expect(eventsOf("workspace:replanned")).toEqual([]);
+      });
+
+      it("維持の対象は同期で completed にした手順だけ（Orchestrator 自身が completed にした手順は戻せる）", () => {
+        const { groupId } = running();
+        const out1 = service.applyLedgerUpdate(groupId, { scheduledSteps: incomingWith(groupId, "s1", "completed") });
+        manager.updateTaskLedger(groupId, {
+          ...manager.getLedger(groupId)!.taskLedger!,
+          scheduledSteps: out1.scheduledSteps,
+        });
+        const out2 = service.applyLedgerUpdate(groupId, { scheduledSteps: incomingWith(groupId, "s1", "in_progress") });
+        expect(statusIn(out2, "s1")).toBe("in_progress");
+      });
+
+      it("irregular: true の更新は incoming を尊重し、以後も維持の対象から外れる", () => {
+        const { groupId } = running();
+        finish(startSub(groupId, "s1").agentId, "success");
+
+        const out = service.applyLedgerUpdate(groupId, {
+          scheduledSteps: incomingWith(groupId, "s1", "in_progress"),
+          irregular: true,
+          reason: "やり直す",
+        });
+        expect(statusIn(out, "s1")).toBe("in_progress");
+
+        // 外れているので、次の（irregular でない）更新の pending も尊重される
+        const out2 = service.applyLedgerUpdate(groupId, { scheduledSteps: incomingWith(groupId, "s1", "pending") });
+        expect(statusIn(out2, "s1")).toBe("pending");
+      });
+
+      it("同じ stepId の Agent が新しく起動した後は戻せる（やり直し）", () => {
+        const { groupId } = running();
+        finish(startSub(groupId, "s1").agentId, "success");
+        expect(stepStatus(groupId, "s1")).toBe("completed");
+
+        startSub(groupId, "s1"); // やり直しの Agent
+        // 台帳は completed のまま（起動では戻さない）が、Orchestrator は in_progress / pending に戻せる
+        expect(stepStatus(groupId, "s1")).toBe("completed");
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incomingWith(groupId, "s1", "in_progress") });
+        expect(statusIn(out, "s1")).toBe("in_progress");
+      });
+
+      it("skipped への更新は尊重される", () => {
+        const { groupId } = running();
+        finish(startSub(groupId, "s1").agentId, "success");
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incomingWith(groupId, "s1", "skipped") });
+        expect(statusIn(out, "s1")).toBe("skipped");
+      });
+
+      it("scheduledSteps を省略した更新では何も変わらない", () => {
+        const { groupId } = running();
+        finish(startSub(groupId, "s1").agentId, "success");
+        const out = service.applyLedgerUpdate(groupId, {});
+        expect(statusIn(out, "s1")).toBe("completed");
+      });
+    });
+
+    // ------------------------------------------------
+    // 吸収条件との両立（初回の再登録の吸収。§13.5.5）
+    // ------------------------------------------------
+    describe("初回の再登録の吸収との両立", () => {
+      const rephrased = (groupId: string): ScheduledStep[] =>
+        structuredClone(steps(groupId)).map((x) =>
+          x.kind === "gate"
+            ? { ...x, description: `言い換え: ${x.description}` }
+            : { ...x, description: `言い換え: ${x.description}`, doneCriteria: ["別の文言"], dependsOn: [] },
+        );
+      /** applyLedgerUpdate の結果を台帳へ書く（MCP ツールの handleUpdateLedger 相当） */
+      const writeLedger = (groupId: string, scheduledSteps: ScheduledStep[]) =>
+        manager.updateTaskLedger(groupId, {
+          ...manager.getLedger(groupId)!.taskLedger!,
+          scheduledSteps,
+        });
+
+      it("run_agents が先行してサーバー同期で in_progress になった後の言い換えの再登録も吸収される", () => {
+        const { groupId } = running();
+        const planned = structuredClone(steps(groupId));
+        startSub(groupId, "s1");
+        expect(stepStatus(groupId, "s1")).toBe("in_progress");
+
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephrased(groupId) });
+        expect(out.absorbed).toBe(true);
+        expect(eventsOf("workspace:replanned")).toEqual([]);
+        expect(out.scheduledSteps.find((x) => x.stepId === "s1")).toMatchObject({
+          description: planned.find((x) => x.stepId === "s1")!.description,
+          status: "in_progress",
+        });
+      });
+
+      it("サーバー同期で completed になった後（success 報告後）の言い換えも吸収される", () => {
+        const { groupId } = running();
+        finish(startSub(groupId, "s1").agentId, "success");
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephrased(groupId) });
+        expect(out.absorbed).toBe(true);
+        expect(eventsOf("workspace:replanned")).toEqual([]);
+      });
+
+      it("Orchestrator 自身が status を変えた後は吸収しない（従来どおり）", () => {
+        const { id, groupId } = running();
+        startSub(groupId, "s1"); // サーバー同期の in_progress
+        const incoming = rephrased(groupId);
+        incoming.find((x) => x.stepId === "s3")!.status = "in_progress"; // Orchestrator が変えた
+        const first = service.applyLedgerUpdate(groupId, { scheduledSteps: incoming });
+        expect(first.absorbed).toBe(true); // この更新の時点では、変えた手順がまだ台帳に無いので吸収される
+        writeLedger(groupId, first.scheduledSteps);
+
+        const second = service.applyLedgerUpdate(groupId, {
+          scheduledSteps: structuredClone(steps(groupId)).map((x) => (x.stepId === "s4" ? { ...x, description: "変えた" } : x)),
+        });
+        expect(second.absorbed).toBe(false);
+        expect(second.scheduledSteps.find((x) => x.stepId === "s4")?.description).toBe("変えた");
+        expect(eventsOf("workspace:replanned")).toEqual([
+          { workspaceId: id, added: [], changed: [expect.objectContaining({ stepId: "s4" })], removed: [] },
+        ]);
+      });
+
+      it("Orchestrator が、サーバー同期済みの手順の status を変えた後も吸収しない", () => {
+        const { groupId } = running();
+        startSub(groupId, "s1"); // サーバー同期の in_progress
+        const incoming = steps(groupId).map((x) => (x.stepId === "s1" ? { ...x, status: "completed" as const } : x));
+        const first = service.applyLedgerUpdate(groupId, { scheduledSteps: structuredClone(incoming) });
+        writeLedger(groupId, first.scheduledSteps);
+
+        const second = service.applyLedgerUpdate(groupId, {
+          scheduledSteps: structuredClone(steps(groupId)).map((x) => (x.stepId === "s4" ? { ...x, description: "変えた" } : x)),
+        });
+        expect(second.absorbed).toBe(false);
+      });
+
+      it("Progress Ledger の記録後は、サーバー同期だけでも吸収しない", () => {
+        const { groupId } = running();
+        startSub(groupId, "s1");
+        manager.updateProgressLedger(groupId, {
+          isRequestSatisfied: { reason: "r", answer: false },
+          isInLoop: { reason: "r", answer: false },
+          isProgressBeingMade: { reason: "r", answer: true },
+          nextAction: { reason: "r", answer: "a" },
+          instruction: { reason: "r", answer: "i" },
+          iteration: 1,
+        });
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephrased(groupId) });
+        expect(out.absorbed).toBe(false);
+      });
+    });
+
+    // ------------------------------------------------
+    // recover: failed の間に届いた成功報告の取りこぼしの反映
+    // ------------------------------------------------
+    describe("recover 時の同期", () => {
+      it("failed（orchestrator_failed）の間に届いた成功報告は、recover 後に completed に反映される", async () => {
+        const { id, groupId, orchestratorId } = running();
+        const done = startSub(groupId, "s1");
+        const other = startSub(groupId, "s2");
+        manager.updateAgentState(other.agentId, { status: "running" });
+        finish(orchestratorId, "failure", "失敗", "失敗", "network down");
+        expect(current(id).status).toBe("failed");
+
+        // Orchestrator が落ちた後にサブ Agent の成功報告が届く（Workspace が実行中でないので同期されない）
+        finish(done.agentId, "success");
+        expect(stepStatus(groupId, "s1")).toBe("in_progress");
+
+        mockKill.mockImplementation((agentId: string) => {
+          setTimeout(() => manager.updateAgentState(agentId, { status: "failed" }), 5);
+        });
+        await recoverAndResume(id, {});
+        expect(stepStatus(groupId, "s1")).toBe("completed");
+        // 報告の無い Agent の手順は変えない
+        expect(stepStatus(groupId, "s2")).toBe("in_progress");
+
+        // 再開プロンプトに担当手順（完了した Agent・停止した Agent）が出る
+        const prompt = lastPrompt();
+        expect(prompt).toContain("担当手順: s1");
+        expect(prompt).toContain("担当手順: s2");
+      });
+
+      it("再開後の古い pending / in_progress の incoming でも、recover で completed にした手順は戻らない", async () => {
+        const { id, groupId, orchestratorId } = running();
+        const done = startSub(groupId, "s1");
+        finish(orchestratorId, "failure", "失敗", "失敗", "boom");
+        finish(done.agentId, "success");
+        await recoverAndResume(id, {});
+        expect(stepStatus(groupId, "s1")).toBe("completed");
+
+        const incoming = structuredClone(steps(groupId));
+        incoming.find((x) => x.stepId === "s1")!.status = "in_progress";
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incoming });
+        expect(out.scheduledSteps.find((x) => x.stepId === "s1")?.status).toBe("completed");
+      });
+
+      it("stepId の無い成功報告・失敗した Agent は反映しない", async () => {
+        const { id, groupId, orchestratorId } = running();
+        const noStep = startSub(groupId, undefined);
+        const failedOne = startSub(groupId, "s2");
+        finish(orchestratorId, "failure", "失敗", "失敗", "boom");
+        finish(noStep.agentId, "success");
+        finish(failedOne.agentId, "failure");
+        await recoverAndResume(id, {});
+        expect(stepStatus(groupId, "s1")).toBe("pending");
+        expect(stepStatus(groupId, "s2")).toBe("in_progress");
+      });
+    });
+  });
+
   describe("Orchestrator 完了の判定", () => {
     it("最終ゲート passed 後の success で done + 完了レポート", async () => {
       const { id, groupId, orchestratorId } = running();

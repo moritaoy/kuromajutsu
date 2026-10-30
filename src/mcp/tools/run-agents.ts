@@ -19,6 +19,7 @@ export function handleRunAgents(
       prompt: string;
       workingDirectory?: string;
       timeout_ms?: number;
+      stepId?: string;
     }>;
   },
 ) {
@@ -93,6 +94,12 @@ const agentSchema = z.object({
   prompt: z.string().describe("Agent に渡すユーザープロンプト"),
   workingDirectory: z.string().optional().describe("作業ディレクトリ"),
   timeout_ms: z.number().optional().describe("タイムアウト（ミリ秒）"),
+  stepId: z
+    .string()
+    .optional()
+    .describe(
+      "担当する手順の stepId（scheduledSteps の stepId）。Workspace の Orchestrator はサブ Agent に担当する手順の stepId を必ず付ける（ダッシュボードの手順の状態に反映される）",
+    ),
 });
 
 export function registerRunAgents(

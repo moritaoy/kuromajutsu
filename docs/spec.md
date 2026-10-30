@@ -183,7 +183,7 @@ MCPサーバーは以下の **14個のツール** を提供する。
 | パラメータ | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `groupId` | `string` | はい | 所属するグループ ID |
-| `agents` | `array` | はい | 起動する Agent の定義配列。各要素: `{ role: string, prompt: string, workingDirectory?: string, timeout_ms?: number }` |
+| `agents` | `array` | はい | 起動する Agent の定義配列。各要素: `{ role: string, prompt: string, workingDirectory?: string, timeout_ms?: number, stepId?: string }`。`stepId` は Workspace の手順（`scheduledSteps` の `stepId`）との対応で、**Workspace の Orchestrator はサブ Agent に必ず付ける**（§13.8.10）。`AgentState.stepId` に保持され、`agent:created` / `agent:result_reported` などのイベントの `data` と `AgentResult.stepId` に含まれる |
 
 **モデルの決定:** `run_agents` はモデルパラメータを受け付けない。使用するモデルは職種（Role）の設定に従う。
 
@@ -226,6 +226,8 @@ MCPサーバーは以下の **14個のツール** を提供する。
 |---|---|---|---|
 | `groupId` | `string` | はい | 所属するグループ ID（`mode: "sequential"` で作成済み） |
 | `stages` | `array` | はい | 実行ステージの配列。各要素: `{ tasks: [{ role, prompt, workingDirectory?, timeout_ms? }] }` |
+
+> `stepId`（Workspace の手順との対応。§2.2.3 / §13.8.10）は `run_agents` のみが受け付ける。`run_sequential` では使わない（未対応）。
 
 **返却値:**
 
@@ -484,6 +486,8 @@ Magentic モードの台帳（Ledger）を更新する。Orchestrator Agent が�
 ```
 
 `type=progress` の応答にも、`type=task` と同様に `nextRunnableSteps` が含まれる。Workspace グループで初回の再登録を吸収した場合（§13.5.5）は、`task` / `progress` のどちらの応答にも `"absorbed": true` と人が読める `note`（「承認済みの計画の文言を維持しました。手順を変えるときは追加・削除を含めるか、Progress Ledger を記録した後に行ってください」）が付く。吸収しなかった更新では `absorbed` / `note` は含まれない。
+
+**`stepStatuses`（Workspace グループのみ）:** Workspace グループの `task` / `progress` の応答には、台帳の現在の `scheduledSteps` の status を `"stepStatuses": [{ "stepId": "s1", "status": "completed" }, ...]` として付ける（その更新を反映した後の値）。Orchestrator は台帳を読めず、サーバーが `run_agents` の `stepId` で同期した status（§13.8.10）を知らないため、次に `scheduledSteps` を送るときはこの値を使う（`completed` を戻さない）。Workspace に紐付かないグループの応答には含まれない。
 
 **Workspace グループでの追加動作（§13.5.5）:**
 - ゲート（`kind: "gate"`）の変更・削除・緩和は、`irregular: true` と `reason` が無ければ拒否する（`GATE_CHANGE_NOT_ALLOWED`）。受理した場合は `GateChange` を記録し、`workspace:irregular` を配信する
@@ -1108,12 +1112,16 @@ interface AgentResult {
   toolCallCount: number;
   /** 失敗時のエラーメッセージ */
   errorMessage?: string;
+  /** Workspace: 担当する手順（scheduledSteps の stepId。`run_agents` の `stepId` を写す） */
+  stepId?: string;
   /** 生の Agent 出力テキスト（オプション） */
   rawOutput?: string;
   /** 完了時刻（ISO 8601） */
   timestamp: string;
 }
 ```
+
+> `AgentState`（Agent の現在の状態。`agent:*` イベントの `data`）にも同じ `stepId?: string`（Workspace: 担当する手順）がある。`run_agents` の `stepId` を起動時に保持し、`AgentResult` へ写す。
 
 ### 6.2 結果の収集方法
 
@@ -2157,14 +2165,14 @@ Magentic では Orchestrator が実行中に計画を変えうる。変更の権
 
 - 条件（**すべて**満たすとき）:
   - Progress Ledger 未記録（`progressLedger` が無く、`progressHistory` も空 = 反復 0）
-  - 現在の台帳の全 Step が `pending`
+  - 現在の台帳の `pending` でない Step は **すべてサーバー同期由来**（`WorkspaceRunner` が `run_agents` の `stepId` による起動 / 成功報告で `in_progress` / `completed` にしたもの。§13.8.10）。Orchestrator 自身が `update_ledger` で `status` を変えた Step が 1 つでもあれば吸収しない（従来どおり。全 Step が `pending` のときも満たす）
   - `gateResults` のどれにも attempt が無い
   - `irregular` が真でない
   - 追加・削除された Step が無い
   - `phases` の構造（`id`・順序・`planning`・`final`・`fix`・`parentPhaseId`）が現在と同じ
-  - （Progress Ledger・全 pending・attempt・`irregular` は `WorkspaceRunner.applyLedgerUpdate` が判定し、追加・削除・`phases` の構造は `guardLedgerUpdate` が判定する）
+  - （Progress Ledger・`pending` でない Step の由来・attempt・`irregular` は `WorkspaceRunner.applyLedgerUpdate` が判定し、追加・削除・`phases` の構造は `guardLedgerUpdate` が判定する）
 - 動作: 既存の全 Step の `role` / `description` / `doneCriteria` / `dependsOn`（work のみ）/ `phaseId` / `kind` と、フェーズの `name` / `goal` / `notes`（現在の台帳に同じ `id` のフェーズがあるもの）を **現在の台帳の値で上書き** してから差分を判定する。`replanned` が空になり `workspace:replanned` は出ず、台帳の文言は計画のまま残る。`status` は incoming の値を使う。何かを上書きしたとき、`update_ledger` の応答に `absorbed: true` と `note` を付ける（§2.2.11）。
-- 吸収しないもの: Step の追加・削除が 1 つでもある更新、`phases` の構造の変更、いずれかの Step が `in_progress` / `completed` / `skipped` になっているとき、ゲートの attempt があるとき、`irregular: true` の更新、Progress Ledger 記録後の更新（正当なリプランとして従来どおり扱う）。ゲートの `checks` / `onFail` の変更・`status` の保護・`irregular` の規則も従来どおり。
+- 吸収しないもの: Step の追加・削除が 1 つでもある更新、`phases` の構造の変更、サーバー同期由来でない Step が `in_progress` / `completed` / `skipped` になっているとき（Orchestrator が `status` を変えた後。サーバー同期だけで `in_progress` / `completed` になっている間は吸収する。これにより `run_agents` が先行して Step が `in_progress` になっても、その後の言い換えの再登録は吸収される）、ゲートの attempt があるとき、`irregular: true` の更新、Progress Ledger 記録後の更新（正当なリプランとして従来どおり扱う）。ゲートの `checks` / `onFail` の変更・`status` の保護・`irregular` の規則も従来どおり。
 
 #### 13.5.6 不合格時の差し戻し（Orchestrator が判断する）
 
@@ -2329,6 +2337,7 @@ Orchestrator のプロンプトに次を注入する。
 6. レビュー資料の作成依頼の仕方（ReviewDoc の形と標準の節。§13.6）。
 7. Task Ledger は承認済みの計画で **登録済み**。**実行の開始直後（最初の反復）は** `update_ledger(type: "task")` で登録し直さず、最初の呼び出しは `type: "progress"` にする。手順を変えず status の更新も要らないときは `scheduledSteps` を省略し（応答の `nextRunnableSteps` は省略時も返る）、含めるときも変えない手順は受け取った内容（`description` / `doneCriteria` / `dependsOn`）をそのまま含める（言い換えない。§13.5.5）。再開時や手順の追加（直前計画・修正フェーズ）では、従来どおり `update_ledger(type: "task", phases, scheduledSteps)` を使う（既存の手順は言い換えない）。共通の台帳ルール（`buildMagenticOrchestratorPrompt`）も `ledgerPreloaded` のとき同じ趣旨に差し替わる（項目 1: 開始時は登録し直さない。項目 2: `scheduledSteps` は status が変わったときだけ含める）。再開プロンプトの Task Ledger にも「登録済み。再登録しない」を添える（§13.8.6）。
 8. 既存の Orchestrator の原則（自分では作業しない、scope / constraints をサブ Agent のプロンプトに転記する、`maxIterations` に達したら途中経過を含めて `report_result` を呼ぶ）。
+9. サブ Agent を起動するときは、`run_agents` の各 agent に担当する手順の `stepId` を **必ず** 付ける（1 Agent 1 手順）。`stepId` はその手順の作業を担当する Agent にだけ付ける。原因の切り分けやレビューは、対応する手順（triage 手順・ゲート）の `stepId` を付け、別の手順の `stepId` を使い回さない。サーバーはこれを使って手順の状態をダッシュボードに反映する（§13.8.10）。あわせて、手順の `status` はサーバーが同期する（起動で `in_progress`、成功報告で `completed`。失敗は変えない）こと、`scheduledSteps` を送るときは `update_ledger` の応答の `stepStatuses`（§2.2.11）の最新の `status` を使い `completed` を戻さないこと、遅延計画・修正フェーズでは手順を台帳に追加してから `run_agents` を呼ぶこと（台帳に無い `stepId` は同期されない）を指示する。再開プロンプト（§13.8.6）にも同じ一文を「共通の注意」として添える。
 
 再開時（§13.8.4）は、これらに加えて再開プロンプト（§13.8.6）を注入する。
 
@@ -2396,7 +2405,7 @@ sequenceDiagram
 | **ゲート結果** | 全ゲートの `GateResult`（attempt ごとの各チェックの合否・note・command の結果の末尾） |
 | **レビュー結果** | 全 `HumanReview`（版、承認 / 差し戻し、**差し戻しコメント**（節 ID 付き）） |
 | イレギュラー | これまでの `GateChange`（理由付き） |
-| 各サブ Agent の結果の要約 | 完了した Agent の `summary` と `editedFiles` / `createdFiles` |
+| 各サブ Agent の結果の要約 | 完了した Agent の `summary` と `editedFiles` / `createdFiles`。`stepId` があれば「担当手順: <stepId>」を添える |
 | 人からの指示 | 差し戻し上限超過後の再試行の指示（`retryInstructions` の最新）、または Orchestrator 異常終了からの再開の指示 |
 | 次にやること | 理由ごとの具体的な指示（下表） |
 
@@ -2453,8 +2462,8 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 
 1. 実行中のゲートの `command`（`run_gate_check`）が残っていれば止める。Orchestrator が `run_gate_check` の待ち中に異常終了した場合も、`failed` にする時点（§13.8.8）で止める。止めた呼び出しは結果を記録しない（再開後に古い結果が attempt の二重記録・差し戻し回数の消費・`GATE_ALREADY_PASSED` を起こしたり、同じ作業ディレクトリでテストが 2 本走ったりしないため）。
 2. `recoveries` に `{ at, failure: { code: "orchestrator_failed", message }, instruction? }` を追記する（失敗の `message` は直前の `statusReason.message`）。
-3. `status` を `running` にし、`statusReason` を消す。`running` になった時点で、同じ Workspace への 2 回目の `resume` は 409 になる。
-4. グループ内でまだ動いている（`running` / `queued` の）サブ Agent を停止する（`killAgent`。Orchestrator 自身は対象外）。部分的な成果はディスクに残る前提で、新しい Orchestrator が成果を確認する。
+3. `status` を `running` にし、`statusReason` を消す。`running` になった時点で、同じ Workspace への 2 回目の `resume` は 409 になる。直後に、実行配下の Agent のうち結果が `success` で `stepId` があるものについて、成功報告の同期（§13.8.10）を行う（`failed` の間に届いた成功報告は同期されず、取りこぼしているため）。
+4. グループ内でまだ動いている（`running` / `queued` の）サブ Agent を停止する（`killAgent`。Orchestrator 自身は対象外）。部分的な成果はディスクに残る前提で、新しい Orchestrator が成果を確認する。 停止したサブ Agent の `stepId` も再開プロンプトに「担当手順」として出す。
 5. すぐ `running` の Workspace を返す。以降は非同期で、旧 Orchestrator **と停止したサブ Agent** の終了を待ち（最大 30 秒の共通の上限。超過時は旧 Orchestrator に SIGTERM。§13.8.4）、再開プロンプト（§13.8.6、理由は「異常終了からの再開」）で新しい Orchestrator を同じ Magentic グループに起動して `workspace:resumed`（`reason: "recover"`）を出す。サブ Agent の終了を待つのは、終了前に起動すると同時実行数の上限（`agent.maxConcurrent`）に当たることがあるため。待っている間に中断（`abort`）された場合は、Orchestrator を起動しない。起動に失敗したら再び `failed`（`orchestrator_failed`）になり、もう一度再開できる。
 6. Progress Ledger の反復番号は通し番号で続け、`maxIterations` も通算で数える（§13.8.4）。再開後に最終ゲートを合格させて Orchestrator が `success` で終了すれば、§13.8.8 のとおり `done` になる。
 
@@ -2483,6 +2492,25 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 | 進捗台帳 | Progress Ledger の履歴（反復ごとの判定） |
 | 活動ログ | Agent の dispatch / report_result / ゲート結果 / 直前計画 / 人間レビュー |
 | ゲート | 各ゲートの `checks` の合否（実行中に ✔ / ✖ が付く） |
+
+**Agent ↔ 手順の対応（`stepId`）と step status の同期:** 画面の手順の状態は Task Ledger の `scheduledSteps[].status` だけで決まる。サブ Agent が `report_result` を呼んでも Orchestrator が次に `update_ledger` で `scheduledSteps` を送るまで台帳は古いままになるため、`run_agents` の `stepId`（§2.2.3）を使って、サーバー（`WorkspaceRunner`）が Agent の起動 / 成功報告を台帳に反映する。サーバー自身の同期なので `ledger-guard`（§13.5.5）は通さない。
+
+| 契機（`manager` のイベント） | 対象の条件（すべて） | 動作 |
+|---|---|---|
+| `agent:created` | 下の対象条件を満たし、該当 step が `pending` | `in_progress` にする |
+| `agent:result_reported` | 下の対象条件を満たし、`status` が `success`、該当 step が `pending` / `in_progress` | `completed` にする |
+
+- **対象条件:** Agent の `stepId` がある / `role` が `orchestrator` でない / Agent のグループが、`running` または `waiting_human` の Workspace の Magentic 親グループ（`groupId`）またはその子グループ（`parentGroupId` が親グループ）/ 台帳に該当 `stepId` の step がちょうど 1 件あり、`kind` が `gate` でない。
+- **変えないもの:** `failure` / `timeout` / `cancelled`（Orchestrator が判断する）、すでに `in_progress` / `completed` / `skipped` の step、`stepId` の無い Agent、台帳に無い `stepId`、ゲート、`done` / `failed` / `aborted` の Workspace。
+- **ゲートとの独立:** ゲート（`kind: "gate"`）の status は従来どおりサーバーのゲート処理（§13.5.2、合格 → `completed` など）だけが更新する。`agent-review` のレビュー Agent にゲートの `stepId` を付けても、この同期はゲートに触れない。
+- 変更があるときだけ `facts` / `plan` / `phases` を現行値のまま `scheduledSteps` を書き戻し、`group:ledger_updated` が出る。Orchestrator が後から同じ `status` を `update_ledger` で送っても `status` は差分（`workspace:replanned`）に含まれない。
+- **巻き戻しの防止:** Orchestrator は台帳を読めないため、サーバーが同期した `status` を知らずに古い `scheduledSteps` を送りうる。サーバー同期で `completed` にした `stepId` は `RunState`（`syncedCompleted`）に覚え、`update_ledger`（`applyLedgerUpdate`）では、その `stepId` の incoming が `pending` / `in_progress` でも `completed` を維持する（`irregular: true` の更新と `skipped` への更新は incoming を尊重し、覚えた `stepId` から外す。台帳から削除された手順も外す）。同じ `stepId` の Agent が新しく起動（`agent:created`）したときも外す（やり直しを許す）。応答の `stepStatuses`（§2.2.11）で現在の `status` を返す。
+- **吸収条件との両立:** サーバー同期で `in_progress` / `completed` にした `stepId` は `RunState`（`syncedStepIds`）に覚え、初回の再登録の吸収（§13.5.5）は「`pending` でない Step はすべてサーバー同期由来」のときに行う。Orchestrator が `update_ledger` で `status` を変えた Step は `syncedStepIds` から外す（= 以後は従来どおり吸収しない）。
+- **recover 時の同期:** `recover`（§13.8.9）で `running` に戻した直後に、実行配下の Agent のうち `result.status` が `success` で `stepId` があるものについて、成功報告の同期（`completed`）を行う（`failed` の間に届いた成功報告の取りこぼし対策）。
+- **起動の同期は要求の時点:** 起動要求（`agent:created`）の時点で `in_progress` にする。spawn に失敗しても `pending` に戻さない（Orchestrator が再投入すれば解消する）。
+- **複数 Agent:** 同じ `stepId` に複数の Agent を付けた場合は、最初の成功報告で `completed` になる（付け方の規則は §13.8.2）。
+- **対象外:** `run_sequential` は `stepId` に対応しない（§2.2.4）。
+- 同期は購読（`agent:created` / `agent:result_reported`）で行い、`WorkspaceService.shutdown()` で外す。同期中の例外は握りつぶしてログに残す（Agent の起動・報告を壊さない）。
 
 ### 13.9 API（HTTP）とイベント（WebSocket）
 

@@ -49,6 +49,24 @@ describe("buildWorkspaceInjectionBlock", () => {
     expect(text).toMatch(/ゲートを実行する前/);
   });
 
+  it("サブ Agent の起動時に run_agents の各 agent へ担当手順の stepId を必ず付ける旨を含む", () => {
+    expect(text).toContain("`run_agents` の各 agent に担当する手順の `stepId` を **必ず** 付ける");
+    expect(text).toContain("1 Agent 1 手順");
+    expect(text).toContain("`stepId` はその手順の作業を担当する Agent にだけ付ける");
+    expect(text).toContain("原因の切り分けやレビューは、対応する手順（triage 手順・ゲート）の stepId を付け、別の手順の stepId を使い回さない");
+    expect(text).toContain("手順の状態をダッシュボードに反映する");
+  });
+
+  it("手順の status はサーバーが同期する（失敗は変えない）。scheduledSteps は応答の stepStatuses を使い completed を戻さない", () => {
+    expect(text).toContain("サブ Agent の起動（`in_progress`）と成功報告（`completed`）で同期する。失敗は変えない");
+    expect(text).toContain("`update_ledger` の応答の `stepStatuses` にある最新の status を使い、`completed` を戻さない");
+  });
+
+  it("遅延計画・修正フェーズでは、手順を台帳に追加してから run_agents を呼ぶ（台帳に無い stepId は同期されない）", () => {
+    const matches = text.match(/台帳に追加してから\*\*? `run_agents` を呼ぶ（台帳に無い stepId は同期されない）/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("ゲートの実行手順（command / agent-review / human）", () => {
     expect(text).toContain("run_gate_check(groupId, gateId)");
     expect(text).toContain("report_gate_result(groupId, gateId, checkIndex, passed, note)");
@@ -284,6 +302,27 @@ describe("buildResumePrompt", () => {
   ];
 
   const base = { workspace, plan, ledger, agentSummaries };
+
+  it("共通: run_agents の各 agent に担当手順の stepId を必ず付ける注意を含む", () => {
+    const text = buildResumePrompt({ ...base, reason: { kind: "approved", gateId: "gate-P1" } });
+    expect(text).toContain("`run_agents` の各 agent に担当する手順の `stepId` を **必ず** 付ける");
+    expect(text).toContain("手順の状態をダッシュボードに反映する");
+    expect(text).toContain("`stepId` はその手順の作業を担当する Agent にだけ付ける");
+    expect(text).toContain("`update_ledger` の応答の `stepStatuses` にある最新の status を使い、`completed` を戻さない");
+  });
+
+  it("共通: 完了したサブ Agent の担当手順（stepId）を「担当手順: <stepId>」で出す（無ければ出さない）", () => {
+    const text = buildResumePrompt({
+      ...base,
+      agentSummaries: [
+        { ...agentSummaries[0], stepId: "s1-STEP" },
+        { ...agentSummaries[1] },
+      ],
+      reason: { kind: "approved", gateId: "gate-P1" },
+    });
+    expect(text).toContain("担当手順: s1-STEP");
+    expect(text.match(/担当手順:/g)).toHaveLength(1);
+  });
 
   it("共通: Workspace・Task Ledger・Progress Ledger・ゲート結果・レビュー・イレギュラー・Agent 要約を含む", () => {
     const text = buildResumePrompt({ ...base, reason: { kind: "approved", gateId: "gate-P1" } });
@@ -577,6 +616,15 @@ describe("buildResumePrompt", () => {
       expect(text).toContain("impl-code");
       expect(text).toContain("src/partial.ts");
       expect(text).toContain("src/new-one.ts");
+    });
+
+    it("途中で停止したサブ Agent の担当手順（stepId）を「担当手順」として出す", () => {
+      const text = recover(makeWorkspace(), {
+        stoppedAgents: [
+          { agentId: "impl-code-9-zzzz", role: "impl-code", stepId: "STOPPED-STEP", status: "failed", editedFiles: [], createdFiles: [] },
+        ],
+      });
+      expect(text).toContain("担当手順: STOPPED-STEP");
     });
 
     it("停止したサブ Agent が無ければ「なし」。他の理由の再開ではこのブロックを出さない", () => {

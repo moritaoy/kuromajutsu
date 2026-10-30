@@ -159,6 +159,17 @@ function planFullText(workspace: Workspace, plan: WorkPlan): string[] {
   ];
 }
 
+/** サブ Agent への `stepId` の付け方（§13.8.2 項目 9 / §13.8.10）。注入ブロックと再開プロンプトで共通 */
+const STEP_ID_RULE =
+  "サブ Agent を起動するときは、`run_agents` の各 agent に担当する手順の `stepId` を **必ず** 付ける（1 Agent 1 手順）。" +
+  "`stepId` はその手順の作業を担当する Agent にだけ付ける。原因の切り分けやレビューは、対応する手順（triage 手順・ゲート）の stepId を付け、別の手順の stepId を使い回さない。" +
+  "サーバーはこれを使って手順の状態をダッシュボードに反映する。";
+
+/** 手順の status の同期と、`scheduledSteps` を送るときの注意（§13.8.10）。注入ブロックと再開プロンプトで共通 */
+const STEP_STATUS_SYNC_RULE =
+  "手順の status は、サーバーがサブ Agent の起動（`in_progress`）と成功報告（`completed`）で同期する。失敗は変えない。" +
+  "`scheduledSteps` を送るときは、`update_ledger` の応答の `stepStatuses` にある最新の status を使い、`completed` を戻さない。";
+
 // --------------------------------------------------
 // 注入ブロック（§13.8.2）
 // --------------------------------------------------
@@ -190,7 +201,10 @@ export function buildWorkspaceInjectionBlock(input: WorkspaceInjectionInput): st
     '   - 追加する手順は `scheduledSteps` に `stepId` / `role` / `description` / `status: "pending"` / `dependsOn` / `phaseId` / `kind: "work"` / `doneCriteria` を付けて入れる。',
     "   - 既存の `phases` と `scheduledSteps`（ゲートを含む）は変更せず、そのまま含めて渡す。**ゲートは変えない。**",
     "   - **そのフェーズのゲートを実行する前に**、追加した手順をすべて実行して完了させる。",
+    "   - **手順を台帳に追加してから** `run_agents` を呼ぶ（台帳に無い stepId は同期されない）。",
     "5. 作業はすべてサブ Agent に委任する。自分では調査・実装・テスト実行をしない。サブ Agent のプロンプトには scope と constraints を必ず転記する。",
+    `   ${STEP_ID_RULE}`,
+    `   ${STEP_STATUS_SYNC_RULE}`,
     '6. ゲートの合否はサーバーが管理する。**ゲート（kind: "gate" の手順）の `status` を自分で `completed` / `skipped` にしない**（`update_ledger` はエラー `GATE_PROTECTED` を返す）。ゲートの状態は、チェックの結果に応じてサーバーが更新する。',
     "7. maxIterations は人間レビューによる停止・再開をまたいで通算で数える。上限に達したら、途中経過を含めて `report_result` を呼ぶ。",
     '8. すべてのゲート（最終ゲートを含む）が合格したら、`report_result(status: "success")` で最終報告をする。その `response` は Markdown で、次の見出しを使って書く（人間向けの完了レポートの文章に使われる）:',
@@ -230,6 +244,7 @@ export function buildWorkspaceInjectionBlock(input: WorkspaceInjectionInput): st
     "   - 原因が前のフェーズの成果物 → 不合格になったフェーズの中に **修正フェーズ** を入れ子で追加し、原因に合う職種で手順を組む。人間レビューで承認済みの成果物を直す場合は、修正フェーズの出口を人間レビューにする。",
     "   - 修正フェーズは、原因のあったフェーズを巻き戻すのではなく **追加** する。合格済みのフェーズやゲートの記録は残す。",
     "3. 修正が終わったら、不合格になったゲートを **同じ条件で** 再チェックする。",
+    "   原因の切り分け・修正の手順は、**台帳に追加してから** `run_agents` を呼ぶ（台帳に無い stepId は同期されない）。切り分けの Agent には triage 手順の stepId、修正の Agent には修正手順の stepId を付ける。",
     "",
     "修正フェーズの作り方（`update_ledger` で追加する。既存の `phases` / `scheduledSteps` は変更せず、そのまま含めること）:",
     "",
@@ -332,6 +347,8 @@ export interface ResumePromptInput {
   agentSummaries: {
     agentId: string;
     role: string;
+    /** 担当した手順（`run_agents` の `stepId`） */
+    stepId?: string;
     summary: string;
     editedFiles: string[];
     createdFiles: string[];
@@ -344,6 +361,8 @@ export interface ResumePromptInput {
   stoppedAgents?: {
     agentId: string;
     role: string;
+    /** 担当していた手順（`run_agents` の `stepId`） */
+    stepId?: string;
     status: string;
     editedFiles: string[];
     createdFiles: string[];
@@ -638,6 +657,9 @@ export function buildResumePrompt(input: ResumePromptInput): string {
     "最後の【次にやること】から作業を再開してください。完了済みの作業をやり直してはいけません。",
     "",
     `再開の理由: ${reasonHeadline(reason)}`,
+    "",
+    `共通の注意: ${STEP_ID_RULE}`,
+    STEP_STATUS_SYNC_RULE,
   ]);
 
   const workspaceBlock = block("再開時の状態 1 — Workspace", [
@@ -679,6 +701,7 @@ export function buildResumePrompt(input: ResumePromptInput): string {
     ...(agentSummaries.length > 0
       ? agentSummaries.flatMap((a) => [
           `- ${a.agentId}（${a.role}）: ${a.summary}`,
+          ...(a.stepId !== undefined ? [`    担当手順: ${a.stepId}`] : []),
           `    編集したファイル: ${a.editedFiles.length > 0 ? a.editedFiles.join(", ") : "（なし）"}`,
           `    作成したファイル: ${a.createdFiles.length > 0 ? a.createdFiles.join(", ") : "（なし）"}`,
         ])
@@ -691,6 +714,7 @@ export function buildResumePrompt(input: ResumePromptInput): string {
           ...(stoppedAgents.length > 0
             ? stoppedAgents.flatMap((a) => [
                 `- ${a.agentId}（${a.role}、状態: ${a.status}）`,
+                ...(a.stepId !== undefined ? [`    担当手順: ${a.stepId}`] : []),
                 `    途中までに編集したファイル: ${a.editedFiles.length > 0 ? a.editedFiles.join(", ") : "（なし）"}`,
                 `    途中までに作成したファイル: ${a.createdFiles.length > 0 ? a.createdFiles.join(", ") : "（なし）"}`,
               ])

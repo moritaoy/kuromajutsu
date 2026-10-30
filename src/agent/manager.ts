@@ -280,6 +280,8 @@ export class AgentManager extends EventEmitter {
        * （Workspace の再開で 2 人目の Orchestrator を同じグループに起動するため）
        */
       asMagenticOrchestrator?: boolean;
+      /** Workspace: 担当する手順（scheduledSteps の stepId） */
+      stepId?: string;
     },
   ): AgentState {
     // グループの存在・アクティブチェック
@@ -317,6 +319,7 @@ export class AgentManager extends EventEmitter {
       prompt,
       editedFiles: [],
       createdFiles: [],
+      ...(options?.stepId !== undefined ? { stepId: options.stepId } : {}),
     };
 
     // Map に登録
@@ -407,6 +410,7 @@ export class AgentManager extends EventEmitter {
       const agent = this.startAgent(groupId, roleDef, task.prompt, {
         workingDirectory: task.workingDirectory,
         timeout_ms: task.timeout_ms,
+        stepId: task.stepId,
       });
       results.push(agent);
     }
@@ -590,6 +594,7 @@ export class AgentManager extends EventEmitter {
           "   - `scheduledSteps` を含めるとき（status の反映・手順の変更）も、変えない手順は受け取った内容（description / doneCriteria / dependsOn）をそのまま含める（言い換えない）。",
           "   - 登録済みの手順は【Workspace 計画】で確認できる。",
           "   - 再開時や手順の追加（直前計画・修正フェーズ）では、従来どおり `update_ledger(type: \"task\", phases, scheduledSteps)` を使う（既存の手順は言い換えない）。",
+          "   - 手順を追加するときは、台帳に追加してから `run_agents` を呼ぶ（台帳に無い stepId は同期されない）。",
           "",
           "   レスポンスの nextRunnableSteps（依存が解決済みで即時実行可能なステップ）は、scheduledSteps を省略したときも返される。",
           "   - nextRunnableSteps に **複数ステップ** がある場合: create_group + run_agents で **並列実行** する",
@@ -650,6 +655,8 @@ export class AgentManager extends EventEmitter {
             "   - scheduledSteps: 手順の status が変わったとき（サブ Agent を起動して \"in_progress\"、完了して \"completed\" など）は、最新の status を反映した scheduledSteps を含める（変えない手順は言い換えない）。",
             "     変わっていなければ省略してよい。応答の nextRunnableSteps は省略時も返る。",
             "     status を反映すると、ダッシュボード上で作業予定のステータスがリアルタイムに可視化される。",
+            "     手順の status は、サーバーがサブ Agent の起動（in_progress）と成功報告（completed）で同期する（失敗は変えない）。",
+            "     scheduledSteps を送るときは、update_ledger の応答の stepStatuses にある最新の status を使い、completed を戻さない。",
           ]
         : [
             "   - scheduledSteps（重要）: 進捗更新と同時に、各ステップの最新ステータスを反映した scheduledSteps を必ず含めること。",
@@ -956,6 +963,7 @@ export class AgentManager extends EventEmitter {
       role: agent.role,
       toolCallCount: agent.toolCallCount,
       errorMessage: reportData.errorMessage,
+      ...(agent.stepId !== undefined ? { stepId: agent.stepId } : {}),
       timestamp: new Date().toISOString(),
     };
 
@@ -1254,6 +1262,7 @@ export class AgentManager extends EventEmitter {
           provider: agent.provider,
           role: agent.role,
           toolCallCount: agent.toolCallCount,
+          ...(agent.stepId !== undefined ? { stepId: agent.stepId } : {}),
           timestamp: new Date().toISOString(),
         });
       }

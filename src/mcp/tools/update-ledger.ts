@@ -153,7 +153,7 @@ export function handleUpdateLedger(
       status: "updated",
     };
 
-    addLedgerResponseExtras(response, manager, args.groupId, absorbed);
+    addLedgerResponseExtras(response, manager, args.groupId, absorbed, group.workspaceId !== undefined);
 
     return {
       content: [
@@ -192,7 +192,7 @@ export function handleUpdateLedger(
     status: "updated",
   };
 
-  addLedgerResponseExtras(response, manager, args.groupId, absorbed);
+  addLedgerResponseExtras(response, manager, args.groupId, absorbed, group.workspaceId !== undefined);
 
   return {
     content: [
@@ -210,17 +210,23 @@ const ABSORBED_NOTE =
 
 /**
  * 応答に `nextRunnableSteps`（scheduledSteps を省略したときも、台帳の現在の scheduledSteps から算出）と、
- * 初回の再登録を吸収したときの `absorbed` / `note` を付ける。
+ * Workspace グループでは `stepStatuses`（台帳の現在の status）、初回の再登録を吸収したときの `absorbed` / `note` を付ける。
  */
 function addLedgerResponseExtras(
   response: Record<string, unknown>,
   manager: AgentManager,
   groupId: string,
   absorbed: boolean,
+  isWorkspace: boolean,
 ): void {
   const ledgerSteps = manager.getLedger(groupId)?.taskLedger?.scheduledSteps;
   if (ledgerSteps) {
     response.nextRunnableSteps = computeNextRunnableSteps(ledgerSteps);
+    // Workspace: 台帳の現在の status（サーバーがサブ Agent の起動 / 成功報告で同期した値を含む）。
+    // Orchestrator は台帳を読めないため、次に scheduledSteps を送るときはこの値を使う
+    if (isWorkspace) {
+      response.stepStatuses = ledgerSteps.map(({ stepId, status }) => ({ stepId, status }));
+    }
   }
   if (absorbed) {
     response.absorbed = true;

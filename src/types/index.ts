@@ -153,6 +153,8 @@ export interface AgentState {
   workingDirectory?: string;
   /** タイムアウト（ミリ秒。run_agents / run_sequential で指定された値を保持） */
   timeout_ms?: number;
+  /** Workspace: 担当する手順（scheduledSteps の stepId） */
+  stepId?: string;
 }
 
 // --------------------------------------------------
@@ -169,6 +171,8 @@ export interface TaskDefinition {
   workingDirectory?: string;
   /** タイムアウト（ミリ秒） */
   timeout_ms?: number;
+  /** Workspace: 担当する手順（scheduledSteps の stepId）。`run_agents` のみ。`run_sequential` では使わない（未対応） */
+  stepId?: string;
 }
 
 /** Sequential モードのステージ定義（各ステージ内は並列実行） */
@@ -345,6 +349,8 @@ export interface AgentResult {
   toolCallCount: number;
   /** 失敗時のエラーメッセージ */
   errorMessage?: string;
+  /** Workspace: 担当する手順（scheduledSteps の stepId） */
+  stepId?: string;
   /** 生の Agent 出力テキスト（オプション） */
   rawOutput?: string;
   /** Magentic Orchestrator 完了時の台帳スナップショット */

@@ -9,6 +9,7 @@ import { readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { AgentManager } from "../agent/manager.js";
 import type {
+  AgentResult,
   AgentState,
   AppConfig,
   GateCheckResult,
@@ -136,6 +137,17 @@ interface RunState {
   watchedAgentId?: string;
   /** 実行中の `run_gate_check` の中断用（中断・シャットダウンで実行中のコマンドを止める） */
   gateAborts: Set<AbortController>;
+  /**
+   * サーバー同期（`syncStepFromAgent`）で `completed` にした stepId。Orchestrator は台帳を読めず、
+   * 古い `scheduledSteps`（`pending` / `in_progress`）を送りうるため、`applyLedgerUpdate` で `completed` を維持する（巻き戻し防止。§13.8.10）。
+   * 同じ stepId の Agent が新しく起動したとき、`irregular: true` の更新、`skipped` への更新、手順の削除で外れる
+   */
+  syncedCompleted: Set<string>;
+  /**
+   * サーバー同期で `in_progress` / `completed` にした stepId。初回の再登録の吸収（§13.5.5）の判定で、
+   * 「pending でない手順はすべてサーバー同期由来」かを見るのに使う。Orchestrator が `update_ledger` で status を変えた手順は外す
+   */
+  syncedStepIds: Set<string>;
 }
 
 const DEFAULT_MAX_RETRIES = 2;
@@ -146,6 +158,8 @@ const RETRY_LIMIT_INSTRUCTION =
   "人が判断したあと、サーバーが新しい Orchestrator で再開します。";
 
 const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+const optionalStepId = (stepId: string | undefined): { stepId?: string } => (stepId !== undefined ? { stepId } : {});
 
 const bullets = (items: string[]): string => items.map((x) => `- ${x}`).join("\n");
 
@@ -168,6 +182,15 @@ export class WorkspaceRunner {
    * EventEmitter のリスナー数が増えず、待ちが無ければ登録も残らない）。
    */
   private completedListener?: (agent: AgentState) => void;
+  /** サブ Agent の起動（`stepId` 付き）で手順を in_progress にする（§13.8.10）。コンストラクタで登録し `shutdown()` で外す */
+  private readonly agentCreatedListener = (agent: AgentState): void => {
+    this.syncStepFromAgent(agent.groupId, agent.role, agent.stepId, "in_progress");
+  };
+  /** サブ Agent の成功報告で手順を completed にする（失敗・タイムアウト・中断は変えない。§13.8.10） */
+  private readonly resultReportedListener = (result: AgentResult): void => {
+    if (result.status !== "success") return;
+    this.syncStepFromAgent(result.groupId, result.role, result.stepId, "completed");
+  };
 
   constructor(
     private readonly config: AppConfig,
@@ -180,6 +203,8 @@ export class WorkspaceRunner {
     for (const ws of store.list()) {
       if (ws.groupId) this.groupIndex.set(ws.groupId, ws.id);
     }
+    this.manager.on("agent:created", this.agentCreatedListener);
+    this.manager.on("agent:result_reported", this.resultReportedListener);
   }
 
   // ----------------------------------------------------
@@ -684,6 +709,13 @@ export class WorkspaceRunner {
       delete w.statusReason;
     });
 
+    // `failed` の間に届いた成功報告は同期できていない（Workspace が実行中でないと同期しない）ため、ここで取りこぼしを反映する
+    for (const agent of this.agentsOfRun(groupId)) {
+      const stepId = agent.stepId ?? agent.result?.stepId;
+      if (agent.role === "orchestrator" || stepId === undefined || agent.result?.status !== "success") continue;
+      this.syncStepFromAgent(agent.groupId, agent.role, stepId, "completed");
+    }
+
     // 途中で動いていたサブ Agent は停止する（部分的な成果はディスクに残る）。旧 Orchestrator は resume() が止める
     const stopped: string[] = [];
     for (const agent of this.agentsOfRun(groupId)) {
@@ -732,6 +764,8 @@ export class WorkspaceRunner {
 
   /** サーバーの終了時: 実行中のゲートの command をすべて中断する */
   shutdown(): void {
+    this.manager.off("agent:created", this.agentCreatedListener);
+    this.manager.off("agent:result_reported", this.resultReportedListener);
     for (const state of this.runs.values()) {
       for (const c of state.gateAborts) c.abort();
     }
@@ -755,19 +789,37 @@ export class WorkspaceRunner {
     const ledger = this.manager.getLedger(groupId)?.taskLedger;
     const currentSteps = ledger?.scheduledSteps ?? [];
 
-    // 初回の再登録の吸収（§13.5.5）: まだ何も進んでいない（Progress Ledger 未記録・全 Step が pending・
-    // ゲートの attempt 無し）うえ irregular でもない更新は、Orchestrator が承認済みの計画を言い換えて
-    // 送っただけのことが多い。type（task / progress）では絞らない（最初の更新は progress で届く）。
-    // 追加・削除された Step や phases の構造の変更が無いことは guardLedgerUpdate 側で判定する
+    // 巻き戻しの防止（§13.8.10）: Orchestrator は台帳を読めず、サーバーが同期した status を知らずに古い
+    // scheduledSteps を送りうる。サーバー同期で completed にした手順は、incoming が pending / in_progress でも
+    // completed を維持する。irregular: true（または skipped への更新）は incoming を尊重し、維持の対象から外す
+    const state = this.runs.get(ws.id);
+    const released: string[] = [];
+    let incomingSteps = args.scheduledSteps;
+    if (incomingSteps && state && state.syncedCompleted.size > 0) {
+      incomingSteps = incomingSteps.map((s) => {
+        if (!state.syncedCompleted.has(s.stepId)) return s;
+        if (args.irregular === true || s.status === "skipped") {
+          released.push(s.stepId);
+          return s;
+        }
+        return s.status === "completed" ? s : { ...s, status: "completed" as const };
+      });
+    }
+
+    // 初回の再登録の吸収（§13.5.5）: まだ何も進んでいない（Progress Ledger 未記録・pending でない Step はすべて
+    // サーバー同期由来（Orchestrator 自身は status を変えていない）・ゲートの attempt 無し）うえ irregular でもない更新は、
+    // Orchestrator が承認済みの計画を言い換えて送っただけのことが多い。type（task / progress）では絞らない
+    // （最初の更新は progress で届く）。追加・削除された Step や phases の構造の変更が無いことは guardLedgerUpdate 側で判定する
     const magentic = this.manager.getLedger(groupId);
     const noProgressYet = !magentic?.progressLedger && (magentic?.progressHistory ?? []).length === 0;
     const nothingStarted =
-      currentSteps.every((s) => s.status === "pending") && ws.gateResults.every((g) => g.attempts.length === 0);
+      currentSteps.every((s) => s.status === "pending" || (state?.syncedStepIds.has(s.stepId) ?? false)) &&
+      ws.gateResults.every((g) => g.attempts.length === 0);
     const absorbRephrase = noProgressYet && nothingStarted && args.irregular !== true;
 
     const result = guardLedgerUpdate({
       current: { phases: ledger?.phases ?? plan.phases, scheduledSteps: currentSteps },
-      incoming: { phases: args.phases, scheduledSteps: args.scheduledSteps ?? currentSteps },
+      incoming: { phases: args.phases, scheduledSteps: incomingSteps ?? currentSteps },
       approvedPlan: plan,
       gateResults: ws.gateResults,
       irregular: args.irregular,
@@ -818,6 +870,21 @@ export class WorkspaceRunner {
       if (status === "passed") return { ...s, status: "completed" as const };
       return s.status === "completed" ? { ...s, status: "in_progress" as const } : s;
     });
+
+    // 同期の記録を更新する。維持の対象から外す手順を外し、Orchestrator が status を変えた手順はサーバー同期由来から外す
+    // （= 以後の再登録は吸収しない）。台帳から消えた手順も外す
+    if (state) {
+      for (const id of released) state.syncedCompleted.delete(id);
+      if (args.scheduledSteps) {
+        const finalIds = new Set(scheduledSteps.map((s) => s.stepId));
+        for (const id of [...state.syncedCompleted]) if (!finalIds.has(id)) state.syncedCompleted.delete(id);
+        for (const id of [...state.syncedStepIds]) if (!finalIds.has(id)) state.syncedStepIds.delete(id);
+      }
+      for (const s of scheduledSteps) {
+        const before = currentSteps.find((c) => c.stepId === s.stepId);
+        if (before && before.status !== s.status) state.syncedStepIds.delete(s.stepId);
+      }
+    }
 
     for (const change of changes) this.emit("workspace:irregular", { workspaceId: ws.id, change });
     for (const p of result.phasePlanned) {
@@ -1174,6 +1241,53 @@ export class WorkspaceRunner {
     });
   }
 
+  /**
+   * サブ Agent の起動 / 成功報告を、担当する手順（`stepId`）の status に反映する（§13.8.10）。
+   * Orchestrator が `update_ledger` で `scheduledSteps` を送り忘れても、実行画面の手順の状態が古いままにならないための同期。
+   * サーバー自身の更新なので `ledger-guard` は通さない。ゲート（`kind: "gate"`）はサーバーのゲート処理
+   * （`syncGateStep`）が管理するため対象外。イベントの listener から呼ばれるため、例外は外に出さない。
+   */
+  private syncStepFromAgent(
+    groupId: string,
+    role: string,
+    stepId: string | undefined,
+    to: "in_progress" | "completed",
+  ): void {
+    if (stepId === undefined || role === "orchestrator") return;
+    try {
+      const group = this.manager.getGroup(groupId);
+      const runGroupId = group?.parentGroupId ?? groupId;
+      const ws = this.findByGroupId(runGroupId);
+      if (!ws || ws.groupId !== runGroupId) return;
+      if (ws.status !== "running" && ws.status !== "waiting_human") return;
+
+      const ledger = this.manager.getLedger(runGroupId)?.taskLedger;
+      const steps = ledger?.scheduledSteps;
+      if (!ledger || !steps) return;
+      const matches = steps.filter((s) => s.stepId === stepId);
+      const cur = matches[0];
+      if (matches.length !== 1 || !cur || cur.kind === "gate") return;
+      const state = this.stateOf(ws.id);
+      // 同じ stepId の Agent が新しく起動したら、completed の維持を外す（やり直しを許す）
+      if (to === "in_progress") state.syncedCompleted.delete(stepId);
+      // 起動: pending のときだけ。成功報告: pending / in_progress のとき（completed / skipped は動かさない）。
+      // 起動要求の時点で in_progress にする（spawn に失敗しても戻さない。Orchestrator が再投入すれば解消する）
+      const applicable = to === "in_progress" ? cur.status === "pending" : cur.status === "pending" || cur.status === "in_progress";
+      if (!applicable) return;
+
+      this.manager.updateTaskLedger(runGroupId, {
+        facts: ledger.facts,
+        plan: ledger.plan,
+        scheduledSteps: steps.map((s) => (s.stepId === stepId ? { ...s, status: to } : s)),
+        ...(ledger.phases ? { phases: ledger.phases } : {}),
+      });
+      state.syncedStepIds.add(stepId);
+      if (to === "completed") state.syncedCompleted.add(stepId);
+    } catch (e) {
+      console.error(`[workspace] 手順の状態の同期に失敗しました (${stepId}): ${errorMessage(e)}`);
+    }
+  }
+
   // ----------------------------------------------------
   // MagenticConfig（§13.8.1）
   // ----------------------------------------------------
@@ -1295,6 +1409,7 @@ export class WorkspaceRunner {
       .map((a) => ({
         agentId: a.agentId,
         role: a.role,
+        ...optionalStepId(a.stepId ?? a.result?.stepId),
         summary: a.result?.summary ?? "",
         editedFiles: [...(a.result?.editedFiles ?? a.editedFiles)],
         createdFiles: [...(a.result?.createdFiles ?? a.createdFiles)],
@@ -1308,6 +1423,7 @@ export class WorkspaceRunner {
       .map((a) => ({
         agentId: a.agentId,
         role: a.role,
+        ...optionalStepId(a.stepId),
         status: a.status,
         editedFiles: [...a.editedFiles],
         createdFiles: [...a.createdFiles],
@@ -1321,7 +1437,7 @@ export class WorkspaceRunner {
   private stateOf(id: string): RunState {
     let s = this.runs.get(id);
     if (!s) {
-      s = { gateAborts: new Set() };
+      s = { gateAborts: new Set(), syncedCompleted: new Set(), syncedStepIds: new Set() };
       this.runs.set(id, s);
     }
     return s;
