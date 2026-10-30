@@ -1436,6 +1436,48 @@ describe("AgentManager — Magentic グループ管理", () => {
     expect(manager.getMagenticConfig(group.id)).toBeUndefined();
   });
 
+  it("buildMagenticOrchestratorPrompt: ledgerPreloaded のとき台帳ルールの 1 は「登録済み・登録し直さない」に差し替わり、通常は従来の文言のまま", () => {
+    const role = config.roles[0];
+    const base: MagenticConfig = {
+      task: "タスク",
+      completionCriteria: "条件",
+      scope: "src/",
+      availableRoles: ["impl-code"],
+      maxIterations: 3,
+      currentIteration: 0,
+    };
+
+    const normal = manager.buildMagenticOrchestratorPrompt(role, "agent-1", "grp-1", base);
+    expect(normal).toContain("1. **タスク分析完了時**: `update_ledger(type: \"task\")` を呼び出し");
+    expect(normal).toContain("facts.given");
+    expect(normal).not.toContain("Task Ledger は登録済み");
+    expect(normal).not.toContain("言い換えない");
+
+    const pre = manager.buildMagenticOrchestratorPrompt(role, "agent-1", "grp-1", { ...base, ledgerPreloaded: true });
+    expect(pre).toContain("Task Ledger は登録済み");
+    expect(pre).toContain("**実行の開始直後（最初の反復）は** `update_ledger(type: \"task\")` で登録し直してはならない");
+    expect(pre).toContain("最初の `update_ledger` は `type: \"progress\"`");
+    expect(pre).toContain("`scheduledSteps` を省略する");
+    expect(pre).toContain("言い換えない");
+    expect(pre).toContain("再開時や手順の追加（直前計画・修正フェーズ）では、従来どおり");
+    expect(pre).not.toContain("タスク分析完了時");
+    // nextRunnableSteps の説明は残る（省略時も返る）
+    expect(pre).toContain("nextRunnableSteps に **複数ステップ** がある場合: create_group + run_agents で **並列実行** する");
+    expect(pre).toContain("nextRunnableSteps が **空** の場合: 全ステップ完了済み");
+    expect(pre).toContain("省略時も返る");
+    // 項目 2 の scheduledSteps は「必ず含める」ではなく「status が変わったとき」
+    expect(pre).not.toContain("scheduledSteps（重要）");
+    expect(pre).not.toContain("必ず含めること");
+    expect(pre).toContain("手順の status が変わったとき");
+    expect(pre).toContain("変わっていなければ省略してよい");
+    // 通常は従来どおり
+    expect(normal).toContain("scheduledSteps（重要）: 進捗更新と同時に");
+    // 2（進捗）・3（リプラン）は残る
+    expect(pre).toContain("各反復の開始時");
+    expect(pre).toContain("リプラン時");
+    expect(pre).toContain("変えないステップは言い換えず");
+  });
+
   it("buildMagenticOrchestratorPrompt で constraints / context 省略時に該当セクションが含まれないこと", () => {
     const role = config.roles[0];
     const magenticCfg: MagenticConfig = {

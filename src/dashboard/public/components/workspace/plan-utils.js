@@ -437,6 +437,20 @@ export function phaseState(model, p) {
   return "pending";
 }
 
+/**
+ * 折りたたんだフェーズの見出しに出す要約。
+ * gate: ゲートの状態（合格 / レビュー待ち / チェック中 / —）、running: 実行中の手順（work を優先。なければ null）
+ */
+export function phaseSummary(model, p) {
+  const g = gateOf(model, p.id);
+  const gate = !g ? "—" : g.gateFailed ? "不合格" : g.status === "done" ? "合格" : g.status === "waiting" ? "レビュー待ち" : g.status === "running" ? "チェック中" : "—";
+  // 入れ子の修正フェーズの手順も含める
+  const collect = (ph) => [...stepsOf(model, ph.id), ...fixesOf(model, ph.id).flatMap(collect)];
+  const ss = collect(p).filter((s) => s.status === "running");
+  const r = ss.find((s) => s.kind === "work") || ss[0] || null;
+  return { gate, running: r ? { id: r.id, title: truncate(r.title, 24) } : null, runningCount: ss.length };
+}
+
 export const PHASE_STATE_LABEL = {
   done: "✓ 完了",
   active: "▶ 実行中",

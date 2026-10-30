@@ -44,6 +44,16 @@ export interface LedgerGuardInput {
   irregular?: boolean;
   reason?: string;
   commandPolicy: CommandPolicy;
+  /**
+   * 初回の再登録の吸収（§13.5.5）。真のとき、追加・削除された Step が無く phases の構造（id・順序・
+   * planning・final・fix・parentPhaseId）も変わらない更新では、既存 Step の `role` / `description` /
+   * `doneCriteria` / `dependsOn`（work のみ）/ `phaseId` / `kind` と、フェーズの `name` / `goal` / `notes` を
+   * current の値で上書きしてから差分を判定する（Orchestrator の言い換えを「変更」にしない）。
+   * ゲートの `checks` / `onFail` と `status` には触れない。
+   * 「Progress Ledger 未記録・全 Step が pending・ゲートの attempt 無し・irregular でない」といった
+   * 呼び出し側の条件は、呼び出し側（`WorkspaceRunner.applyLedgerUpdate`）で判定してから指定する。
+   */
+  absorbRephrase?: boolean;
 }
 
 export type NewGateChange = Omit<GateChange, "id" | "at" | "acknowledgedAt">;
@@ -59,6 +69,8 @@ export type LedgerGuardResult =
       /** `deferred` フェーズに work Step が追加されたもの（フェーズごと） */
       phasePlanned: { phaseId: string; addedSteps: ScheduledStep[] }[];
       replanned: { added: ScheduledStep[]; changed: ScheduledStep[]; removed: string[] };
+      /** 初回の再登録の吸収で、言い換えを current の値に戻した（実際に何かを上書きした）とき true */
+      absorbed: boolean;
     }
   | { ok: false; code: LedgerGuardErrorCode; message: string };
 
@@ -193,6 +205,13 @@ export function guardLedgerUpdate(input: LedgerGuardInput): LedgerGuardResult {
   const completed = completePhases(input.incoming.phases, current.phases);
   if (typeof completed === "string") return fail("INVALID_PHASES", completed);
   const resultPhases = completed;
+  let absorbed = false;
+  if (input.absorbRephrase === true && isRephraseOnly(current, merged, resultPhases)) {
+    const before = { steps: structuredClone(merged), phases: structuredClone(resultPhases) };
+    absorbRephrase(merged, curById);
+    absorbPhaseRephrase(resultPhases, current.phases);
+    absorbed = !same(before.steps, merged) || !same(before.phases, resultPhases);
+  }
   const phaseError = checkPhases(resultPhases, merged, approvedPlan, curById);
   if (phaseError) return fail("INVALID_PHASES", phaseError);
 
@@ -275,7 +294,60 @@ export function guardLedgerUpdate(input: LedgerGuardInput): LedgerGuardResult {
   // 5. 差分の分類
   const { phasePlanned, replanned } = classify(current, scheduledSteps, resultPhases);
 
-  return { ok: true, phases: resultPhases, scheduledSteps, gateChanges, phasePlanned, replanned };
+  return { ok: true, phases: resultPhases, scheduledSteps, gateChanges, phasePlanned, replanned, absorbed };
+}
+
+// --------------------------------------------------
+// 初回の再登録の吸収
+// --------------------------------------------------
+
+/** フェーズの構造（言い換えの対象の `name` / `goal` / `notes` を除いた部分） */
+function phaseStructure(p: Phase) {
+  return { id: p.id, planning: p.planning, final: p.final === true, fix: p.fix ?? null, parentPhaseId: p.parentPhaseId ?? null };
+}
+
+/** 追加・削除された Step が無く、phases の構造も current と同じ（= 既存の書き直しだけ）か */
+function isRephraseOnly(
+  current: { phases: Phase[]; scheduledSteps: ScheduledStep[] },
+  merged: ScheduledStep[],
+  resultPhases: Phase[],
+): boolean {
+  if (merged.length !== current.scheduledSteps.length) return false;
+  const curIds = new Set(current.scheduledSteps.map((s) => s.stepId));
+  if (!merged.every((s) => curIds.has(s.stepId))) return false;
+  return same(resultPhases.map(phaseStructure), current.phases.map(phaseStructure));
+}
+
+/** 吸収の対象にする内容（ゲートの `checks` / `onFail` と `status` は含めない。`dependsOn` は work のみ別扱い） */
+const ABSORBED_KEYS = ["role", "description", "doneCriteria", "phaseId", "kind"] as const;
+
+/** 既存 Step の書き直しを current の値で上書きする（merged を直接書き換える） */
+function absorbRephrase(merged: ScheduledStep[], curById: Map<string, ScheduledStep>): void {
+  for (const out of merged) {
+    const cur = curById.get(out.stepId);
+    if (!cur) continue;
+    const target = out as unknown as Record<string, unknown>;
+    const keys: string[] = [...ABSORBED_KEYS];
+    // ゲートの dependsOn は実効依存から導出されるので触らない
+    if (!isGate(cur)) keys.push("dependsOn");
+    for (const key of keys) {
+      const value = (cur as unknown as Record<string, unknown>)[key];
+      if (value === undefined) delete target[key];
+      else target[key] = structuredClone(value);
+    }
+  }
+}
+
+/** フェーズの言い換え（`name` / `goal` / `notes`）を current の値で上書きする（resultPhases を直接書き換える） */
+function absorbPhaseRephrase(resultPhases: Phase[], currentPhases: Phase[]): void {
+  const curById = new Map(currentPhases.map((p) => [p.id, p]));
+  for (const p of resultPhases) {
+    const cur = curById.get(p.id);
+    if (!cur) continue;
+    p.name = cur.name;
+    p.goal = cur.goal;
+    p.notes = structuredClone(cur.notes);
+  }
 }
 
 // --------------------------------------------------

@@ -207,6 +207,11 @@ export interface MagenticConfig {
   currentIteration: number;
   /** Orchestrator プロンプトの末尾に連結する追記（Workspace の注入ブロック・再開プロンプト。§13.8.2） */
   promptAppendix?: string;
+  /**
+   * Task Ledger がすでに登録済み（Workspace の承認時にサーバーが計画から投入する）。
+   * 真のとき Orchestrator プロンプトの台帳ルールは「最初に type: "task" で登録し直さない」に差し替わる。
+   */
+  ledgerPreloaded?: boolean;
 }
 
 // --------------------------------------------------

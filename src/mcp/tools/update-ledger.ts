@@ -116,6 +116,7 @@ export function handleUpdateLedger(
   // Workspace グループ: scheduledSteps / phases を含む更新はゲートの不変性の規則で検証・正規化する（§13.5.5）
   let steps = args.scheduledSteps;
   let phases: Phase[] | undefined;
+  let absorbed = false;
   if (
     group.workspaceId !== undefined &&
     workspaceService !== undefined &&
@@ -130,6 +131,7 @@ export function handleUpdateLedger(
       });
       steps = applied.scheduledSteps;
       phases = applied.phases;
+      absorbed = applied.absorbed;
     } catch (e) {
       return workspaceErrorResponse(e);
     }
@@ -151,9 +153,7 @@ export function handleUpdateLedger(
       status: "updated",
     };
 
-    if (args.scheduledSteps && steps) {
-      response.nextRunnableSteps = computeNextRunnableSteps(steps);
-    }
+    addLedgerResponseExtras(response, manager, args.groupId, absorbed);
 
     return {
       content: [
@@ -192,9 +192,7 @@ export function handleUpdateLedger(
     status: "updated",
   };
 
-  if (args.scheduledSteps && steps) {
-    response.nextRunnableSteps = computeNextRunnableSteps(steps);
-  }
+  addLedgerResponseExtras(response, manager, args.groupId, absorbed);
 
   return {
     content: [
@@ -204,6 +202,30 @@ export function handleUpdateLedger(
       },
     ],
   };
+}
+
+/** 吸収したときの応答の `note`（Orchestrator に「言い換えは反映されない」ことを伝える） */
+const ABSORBED_NOTE =
+  "承認済みの計画の文言を維持しました。手順を変えるときは追加・削除を含めるか、Progress Ledger を記録した後に行ってください";
+
+/**
+ * 応答に `nextRunnableSteps`（scheduledSteps を省略したときも、台帳の現在の scheduledSteps から算出）と、
+ * 初回の再登録を吸収したときの `absorbed` / `note` を付ける。
+ */
+function addLedgerResponseExtras(
+  response: Record<string, unknown>,
+  manager: AgentManager,
+  groupId: string,
+  absorbed: boolean,
+): void {
+  const ledgerSteps = manager.getLedger(groupId)?.taskLedger?.scheduledSteps;
+  if (ledgerSteps) {
+    response.nextRunnableSteps = computeNextRunnableSteps(ledgerSteps);
+  }
+  if (absorbed) {
+    response.absorbed = true;
+    response.note = ABSORBED_NOTE;
+  }
 }
 
 /**

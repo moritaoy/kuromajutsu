@@ -5,7 +5,7 @@
 // waiting_human のときは、上部に人間レビュー / 再試行のパネルを出す。
 
 import { createElement as h, useState, useMemo } from "react";
-import { PlanBoard, BoardLegend, RoleChip } from "./PlanBoard.js";
+import { PlanBoard, BoardLegend, RoleChip, CollapseControls } from "./PlanBoard.js";
 import { DetailFor } from "./StepDetail.js";
 import { HumanReviewPanel } from "./HumanReviewPanel.js";
 import { RetryPanel } from "./RetryPanel.js";
@@ -175,6 +175,9 @@ export function RunView({ workspace, meta, config, state, api, dispatch }) {
   const ledger = workspace.groupId ? state.ledgers[workspace.groupId] : null;
   const model = useMemo(() => modelFromLedger(workspace, ledger, meta), [workspace, ledger, meta]);
   const [selectedId, setSelectedId] = useState(null);
+  // 「すべて展開 / すべて畳む」の要求（seq が変わるたびに PlanBoard が反映する）
+  const [collapseReq, setCollapseReq] = useState({ kind: "none", seq: 0 });
+  const requestCollapse = (kind) => setCollapseReq((r) => ({ kind, seq: r.seq + 1 }));
   const [tab, setTab] = useState("log");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -234,9 +237,9 @@ export function RunView({ workspace, meta, config, state, api, dispatch }) {
     h("div", { className: "runlayout" },
       h("div", { className: "board-box" },
         h("div", { className: "board-head" },
-          h("span", { className: "muted", style: { fontSize: 12 } }, "計画表（Task Ledger）— 上から下へ実行"), h(BoardLegend)),
+          h("span", { className: "muted", style: { fontSize: 12 } }, "計画表（Task Ledger）— 上から下へ実行"), h(BoardLegend), h(CollapseControls, { onRequest: requestCollapse })),
         h("div", { className: "board-wrap" },
-          h(PlanBoard, { model, config, mode: "run", selectedId, onSelect: setSelectedId }))),
+          h(PlanBoard, { model, config, mode: "run", selectedId, onSelect: setSelectedId, collapseRequest: collapseReq }))),
       h("div", { className: "rail" },
         h("div", { className: "orch" },
           h("div", { className: "orch-h" }, h(RoleChip, { config, role: "orchestrator" }),
@@ -263,14 +266,16 @@ export function ReadonlyBoard({ workspace, meta, config, state }) {
     return last ? modelFromPlan(last) : null;
   }, [workspace, ledger, meta]);
   const [selectedId, setSelectedId] = useState(null);
+  const [collapseReq, setCollapseReq] = useState({ kind: "none", seq: 0 });
   if (!model || model.phases.length === 0) return null;
   const mode = workspace.approvedRevision ? "run" : "view";
   return h("div", null,
     h("div", { className: "board-box" },
       h("div", { className: "board-head" },
         h("span", { className: "muted", style: { fontSize: 12 } }, `最後の計画表（${STATUS_LABEL[workspace.status] || workspace.status}・読み取り専用）`),
-        mode === "run" && h(BoardLegend)),
-      h("div", { className: "board-wrap" }, h(PlanBoard, { model, config, mode, selectedId, onSelect: setSelectedId }))),
+        mode === "run" && h(BoardLegend),
+        mode === "run" && h(CollapseControls, { onRequest: (kind) => setCollapseReq((r) => ({ kind, seq: r.seq + 1 })) })),
+      h("div", { className: "board-wrap" }, h(PlanBoard, { model, config, mode, selectedId, onSelect: setSelectedId, collapseRequest: collapseReq }))),
     selectedId && h("div", { className: "drawer" },
       h("div", { className: "body sel-sec" },
         h(DetailFor, { model, id: selectedId, config, workspace, onSelect: setSelectedId, onClose: () => setSelectedId(null) }))));

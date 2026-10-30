@@ -635,7 +635,8 @@ describe("update_ledger", () => {
         iteration: 2,
       }).content[0].text,
     );
-    expect(data).not.toHaveProperty("nextRunnableSteps");
+    // scheduledSteps 省略時も、台帳の現在の scheduledSteps から nextRunnableSteps を返す
+    expect(data.nextRunnableSteps).toEqual([{ stepId: "s1", role: "impl-code", description: "調査" }]);
   });
 });
 
@@ -817,6 +818,72 @@ describe("update_ledger（Workspace グループ）", () => {
       h.service,
     );
     expect(res).not.toHaveProperty("isError");
+  });
+
+  describe("初回の再登録の吸収（§13.5.5）", () => {
+    const progressArgs = {
+      isRequestSatisfied: { reason: "r", answer: false },
+      isInLoop: { reason: "r", answer: false },
+      isProgressBeingMade: { reason: "r", answer: true },
+      nextAction: { reason: "r", answer: "a" },
+      instruction: { reason: "r", answer: "i" },
+      iteration: 1,
+    };
+    const rephrased = (): ScheduledStep[] =>
+      currentSteps().map((s) =>
+        s.kind === "gate"
+          ? { ...s, description: `言い換え: ${s.description}` }
+          : { ...s, description: `言い換え: ${s.description}`, doneCriteria: ["別の文言"], dependsOn: [] },
+      );
+    const runnableIds = (body: { nextRunnableSteps: { stepId: string }[] }) => body.nextRunnableSteps.map((s) => s.stepId);
+
+    it("最初の type: progress の言い換えは吸収され、応答に absorbed: true と note、nextRunnableSteps が付く", () => {
+      const planned = currentSteps();
+      const res = handleUpdateLedger(
+        h.manager,
+        { groupId, type: "progress", ...progressArgs, scheduledSteps: rephrased() },
+        h.service,
+      );
+      expect(res).not.toHaveProperty("isError");
+      const body = parse(res);
+      expect(body).toMatchObject({ type: "progress", status: "updated", absorbed: true });
+      expect(body.note).toContain("承認済みの計画の文言を維持しました");
+      expect(runnableIds(body)).toEqual(["s1"]);
+      expect(ledgerOf().scheduledSteps).toEqual(planned);
+    });
+
+    it("type: task の言い換えも吸収され、応答に absorbed: true と note が付く", () => {
+      const res = updateTask({ scheduledSteps: rephrased() });
+      const body = parse(res);
+      expect(body).toMatchObject({ type: "task", status: "updated", absorbed: true });
+      expect(typeof body.note).toBe("string");
+      expect(ledgerOf().scheduledSteps).toEqual(currentSteps());
+    });
+
+    it("吸収しない更新（言い換えなし）の応答に absorbed / note は付かない", () => {
+      const body = parse(updateTask({ scheduledSteps: currentSteps() }));
+      expect(body).not.toHaveProperty("absorbed");
+      expect(body).not.toHaveProperty("note");
+    });
+
+    it("scheduledSteps を省略した進捗更新でも nextRunnableSteps を台帳の現在の手順から返す（task も同様）", () => {
+      const prog = parse(handleUpdateLedger(h.manager, { groupId, type: "progress", ...progressArgs }, h.service));
+      expect(runnableIds(prog)).toEqual(["s1"]);
+      expect(prog).not.toHaveProperty("absorbed");
+
+      const steps = currentSteps();
+      steps.find((s) => s.stepId === "s1")!.status = "completed";
+      h.manager.updateTaskLedger(groupId, {
+        facts,
+        plan: ["計画"],
+        phases: ledgerOf().phases,
+        scheduledSteps: steps,
+      });
+      const after = parse(handleUpdateLedger(h.manager, { groupId, type: "progress", ...progressArgs, iteration: 2 }, h.service));
+      expect(runnableIds(after)).not.toContain("s1");
+      const task = parse(updateTask({}));
+      expect(Array.isArray(task.nextRunnableSteps)).toBe(true);
+    });
   });
 
   it("停止した Workspace の台帳更新は WORKSPACE_NOT_RUNNING", () => {

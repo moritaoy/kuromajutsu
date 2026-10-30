@@ -581,6 +581,43 @@ export class AgentManager extends EventEmitter {
       "---",
     ].join("\n");
 
+    // Workspace では承認済みの計画で Task Ledger が登録済み。最初に登録し直させない
+    const taskRegistrationLines: string[] = config.ledgerPreloaded
+      ? [
+          "1. **開始時（Task Ledger は登録済み）**: Task Ledger は承認済みの計画ですでに登録されている。",
+          "   **実行の開始直後（最初の反復）は** `update_ledger(type: \"task\")` で登録し直してはならない。最初の `update_ledger` は `type: \"progress\"`（下記 2）で呼ぶ。",
+          "   - 手順（scheduledSteps）を変えず、status の更新も要らないときは `scheduledSteps` を省略する。",
+          "   - `scheduledSteps` を含めるとき（status の反映・手順の変更）も、変えない手順は受け取った内容（description / doneCriteria / dependsOn）をそのまま含める（言い換えない）。",
+          "   - 登録済みの手順は【Workspace 計画】で確認できる。",
+          "   - 再開時や手順の追加（直前計画・修正フェーズ）では、従来どおり `update_ledger(type: \"task\", phases, scheduledSteps)` を使う（既存の手順は言い換えない）。",
+          "",
+          "   レスポンスの nextRunnableSteps（依存が解決済みで即時実行可能なステップ）は、scheduledSteps を省略したときも返される。",
+          "   - nextRunnableSteps に **複数ステップ** がある場合: create_group + run_agents で **並列実行** する",
+          "   - nextRunnableSteps に **1ステップ** の場合: 単独で実行する",
+          "   - nextRunnableSteps が **空** の場合: 全ステップ完了済み",
+          "",
+        ]
+      : [
+          "1. **タスク分析完了時**: `update_ledger(type: \"task\")` を呼び出し、以下を記録する:",
+          "   - facts.given: 与えられた事実（ユーザーの指示や前提条件）",
+          "   - facts.toInvestigate: 調査が必要な事項",
+          "   - facts.toDerive: 導出すべき事項",
+          "   - facts.assumptions: 推測・仮定",
+          "   - plan: 実行計画のステップ一覧（高レベル）",
+          "   - scheduledSteps（推奨）: 構造化された作業予定。各ステップに stepId, role, description, status, dependsOn を指定する。",
+          "     例: [",
+          "       { stepId: \"s1\", role: \"explore\", description: \"コードベース調査\", status: \"pending\" },",
+          "       { stepId: \"s2\", role: \"impl-code\", description: \"実装\", status: \"pending\", dependsOn: [\"s1\"] },",
+          "       { stepId: \"s3\", role: \"impl-test\", description: \"テスト作成\", status: \"pending\", dependsOn: [\"s1\"] }",
+          "     ]",
+          "",
+          "   scheduledSteps を指定した場合、レスポンスに nextRunnableSteps（依存が解決済みで即時実行可能なステップ）が返される。",
+          "   - nextRunnableSteps に **複数ステップ** がある場合: create_group + run_agents で **並列実行** する",
+          "   - nextRunnableSteps に **1ステップ** の場合: 単独で実行する",
+          "   - nextRunnableSteps が **空** の場合: 全ステップ完了済み",
+          "",
+        ];
+
     const toolGuideBlock = [
       "",
       "---",
@@ -600,24 +637,7 @@ export class AgentManager extends EventEmitter {
       "",
       "人間がダッシュボードであなたの思考過程を追跡できるよう、以下のタイミングで update_ledger を呼び出してください。",
       "",
-      "1. **タスク分析完了時**: `update_ledger(type: \"task\")` を呼び出し、以下を記録する:",
-      "   - facts.given: 与えられた事実（ユーザーの指示や前提条件）",
-      "   - facts.toInvestigate: 調査が必要な事項",
-      "   - facts.toDerive: 導出すべき事項",
-      "   - facts.assumptions: 推測・仮定",
-      "   - plan: 実行計画のステップ一覧（高レベル）",
-      "   - scheduledSteps（推奨）: 構造化された作業予定。各ステップに stepId, role, description, status, dependsOn を指定する。",
-      "     例: [",
-      "       { stepId: \"s1\", role: \"explore\", description: \"コードベース調査\", status: \"pending\" },",
-      "       { stepId: \"s2\", role: \"impl-code\", description: \"実装\", status: \"pending\", dependsOn: [\"s1\"] },",
-      "       { stepId: \"s3\", role: \"impl-test\", description: \"テスト作成\", status: \"pending\", dependsOn: [\"s1\"] }",
-      "     ]",
-      "",
-      "   scheduledSteps を指定した場合、レスポンスに nextRunnableSteps（依存が解決済みで即時実行可能なステップ）が返される。",
-      "   - nextRunnableSteps に **複数ステップ** がある場合: create_group + run_agents で **並列実行** する",
-      "   - nextRunnableSteps に **1ステップ** の場合: 単独で実行する",
-      "   - nextRunnableSteps が **空** の場合: 全ステップ完了済み",
-      "",
+      ...taskRegistrationLines,
       "2. **各反復の開始時**: `update_ledger(type: \"progress\")` を呼び出し、以下の 5 項目を判定・記録する:",
       "   - isRequestSatisfied: { reason: \"判定理由\", answer: true/false } — リクエストは満たされたか",
       "   - isInLoop: { reason: \"判定理由\", answer: true/false } — ループに陥っていないか",
@@ -625,12 +645,23 @@ export class AgentManager extends EventEmitter {
       "   - nextAction: { reason: \"判定理由\", answer: \"次のアクションの説明\" } — 次に何をするか",
       "   - instruction: { reason: \"判定理由\", answer: \"サブ Agent への具体的指示\" } — サブ Agent にどう指示するか",
       "   - iteration: 現在の反復番号",
-      "   - scheduledSteps（重要）: 進捗更新と同時に、各ステップの最新ステータスを反映した scheduledSteps を必ず含めること。",
-      "     サブ Agent を起動したステップは \"in_progress\" に、完了したステップは \"completed\" に更新する。",
-      "     これによりダッシュボード上で作業予定のステータスがリアルタイムに可視化される。",
+      ...(config.ledgerPreloaded
+        ? [
+            "   - scheduledSteps: 手順の status が変わったとき（サブ Agent を起動して \"in_progress\"、完了して \"completed\" など）は、最新の status を反映した scheduledSteps を含める（変えない手順は言い換えない）。",
+            "     変わっていなければ省略してよい。応答の nextRunnableSteps は省略時も返る。",
+            "     status を反映すると、ダッシュボード上で作業予定のステータスがリアルタイムに可視化される。",
+          ]
+        : [
+            "   - scheduledSteps（重要）: 進捗更新と同時に、各ステップの最新ステータスを反映した scheduledSteps を必ず含めること。",
+            "     サブ Agent を起動したステップは \"in_progress\" に、完了したステップは \"completed\" に更新する。",
+            "     これによりダッシュボード上で作業予定のステータスがリアルタイムに可視化される。",
+          ]),
       "",
       "3. **リプラン時**: `update_ledger(type: \"task\")` で plan と scheduledSteps を更新する。",
       "   - 完了済みステップの status を \"completed\" に、不要になったステップを \"skipped\" に変更する",
+      ...(config.ledgerPreloaded
+        ? ["   - 変えないステップは言い換えず、受け取った内容（description / doneCriteria / dependsOn）をそのまま含める"]
+        : []),
       "   - 新たなステップの追加、dependsOn の変更、順序変更も自由に行える",
       "   - レスポンスの nextRunnableSteps で次に実行すべきステップを確認する",
       "",

@@ -353,6 +353,7 @@ describe("WorkspaceService（実行系）", () => {
       expect(cfg.availableRoles).not.toContain("planner");
       expect(cfg.maxIterations).toBe(12);
       expect(cfg.promptAppendix).toContain("Workspace 実行ルール");
+      expect(cfg.ledgerPreloaded).toBe(true);
     });
 
     it("maxIterations を指定すると上書きし、計画（revision）にも反映する", () => {
@@ -1557,6 +1558,16 @@ describe("WorkspaceService（実行系）", () => {
   // ----------------------------------------------------
 
   describe("applyLedgerUpdate / ackIrregular", () => {
+    const recordProgress = (groupId: string) =>
+      manager.updateProgressLedger(groupId, {
+        isRequestSatisfied: { reason: "r", answer: false },
+        isInLoop: { reason: "r", answer: false },
+        isProgressBeingMade: { reason: "r", answer: true },
+        nextAction: { reason: "r", answer: "a" },
+        instruction: { reason: "r", answer: "i" },
+        iteration: 1,
+      });
+
     it("irregular + reason のゲート変更は gateChanges に記録され workspace:irregular を emit する", () => {
       const { id, groupId } = running();
       const incoming = structuredClone(steps(groupId));
@@ -1596,6 +1607,8 @@ describe("WorkspaceService（実行系）", () => {
 
     it("拒否される更新は WorkspaceError（コード付き）で、記録もイベントも出さない", () => {
       const { id, groupId } = running();
+      // 初回の再登録の吸収（§13.5.5）の対象外にするため、Progress Ledger を記録済みにする
+      recordProgress(groupId);
       const incoming = structuredClone(steps(groupId));
       incoming.find((s) => s.stepId === "gate-P3")!.role = "text-review";
       expect(codeOf(() => service.applyLedgerUpdate(groupId, { scheduledSteps: incoming }))).toBe("GATE_CHANGE_NOT_ALLOWED");
@@ -1650,6 +1663,102 @@ describe("WorkspaceService（実行系）", () => {
         { workspaceId: id, phaseId: "P2", addedSteps: [expect.objectContaining({ stepId: "i1" })] },
       ]);
       expect(eventsOf("workspace:replanned")).toEqual([]);
+    });
+
+    /** 承認済みの計画を言い換えた incoming（work は description / doneCriteria / dependsOn、ゲートは description） */
+    const rephrasedSteps = (groupId: string): ScheduledStep[] =>
+      structuredClone(steps(groupId)).map((s) =>
+        s.kind === "gate"
+          ? { ...s, description: `言い換え: ${s.description}` }
+          : { ...s, description: `言い換え: ${s.description}`, doneCriteria: ["別の文言"], dependsOn: [] },
+      );
+
+    it("承認直後の言い換えの再登録は吸収され、workspace:replanned を出さず台帳は計画のまま（absorbed: true）", () => {
+      const { groupId } = running();
+      const planned = structuredClone(steps(groupId));
+      const incoming = rephrasedSteps(groupId);
+      incoming.find((s) => s.stepId === "s1")!.status = "in_progress";
+
+      const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incoming });
+      expect(out.absorbed).toBe(true);
+      expect(eventsOf("workspace:replanned")).toEqual([]);
+      expect(out.scheduledSteps.find((s) => s.stepId === "s1")).toMatchObject({
+        description: planned.find((s) => s.stepId === "s1")!.description,
+        doneCriteria: planned.find((s) => s.stepId === "s1")!.doneCriteria,
+        status: "in_progress",
+      });
+      expect(out.scheduledSteps.find((s) => s.stepId === "s2")?.dependsOn).toEqual(["s1"]);
+    });
+
+    it("最初の更新が言い換えを含んでいれば吸収される（type: task か progress かでは絞らない）", () => {
+      const { groupId } = running();
+      const planned = structuredClone(steps(groupId));
+      const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephrasedSteps(groupId) });
+      expect(out.absorbed).toBe(true);
+      expect(out.scheduledSteps).toEqual(planned);
+      expect(eventsOf("workspace:replanned")).toEqual([]);
+    });
+
+    it("phases の name / goal の言い換えも吸収され、台帳のフェーズは計画のまま", () => {
+      const { groupId } = running();
+      const ledgerPhases = structuredClone(manager.getLedger(groupId)!.taskLedger!.phases!);
+      const phases = ledgerPhases.map((p) => ({ ...p, name: `言い換え: ${p.name}`, goal: `言い換え: ${p.goal}` }));
+      const out = service.applyLedgerUpdate(groupId, { phases, scheduledSteps: rephrasedSteps(groupId) });
+      expect(out.absorbed).toBe(true);
+      expect(out.phases).toEqual(ledgerPhases);
+      expect(eventsOf("workspace:replanned")).toEqual([]);
+    });
+
+    describe("吸収しない条件", () => {
+      const changedEvent = (id: string) => [
+        { workspaceId: id, added: [], changed: [expect.objectContaining({ stepId: "s3" })], removed: [] },
+      ];
+      const rephraseS3 = (groupId: string): ScheduledStep[] =>
+        structuredClone(steps(groupId)).map((s) => (s.stepId === "s3" ? { ...s, description: "言い換え" } : s));
+      const resetToPlan = (groupId: string, planned: ScheduledStep[]) => {
+        const ledger = manager.getLedger(groupId)!.taskLedger!;
+        manager.updateTaskLedger(groupId, { facts: ledger.facts, plan: ledger.plan, phases: ledger.phases, scheduledSteps: planned });
+      };
+
+      it("Progress Ledger を記録したあとは吸収せず、従来どおり workspace:replanned", () => {
+        const { id, groupId } = running();
+        recordProgress(groupId);
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephraseS3(groupId) });
+        expect(out.absorbed).toBe(false);
+        expect(out.scheduledSteps.find((s) => s.stepId === "s3")?.description).toBe("言い換え");
+        expect(eventsOf("workspace:replanned")).toEqual(changedEvent(id));
+      });
+
+      it.each(["in_progress", "completed"] as const)("いずれかの Step が %s なら吸収しない", (status) => {
+        const { id, groupId } = running();
+        const planned = structuredClone(steps(groupId));
+        planned.find((s) => s.stepId === "s1")!.status = status;
+        resetToPlan(groupId, planned);
+        const incoming = rephraseS3(groupId);
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: incoming });
+        expect(out.absorbed).toBe(false);
+        expect(out.scheduledSteps.find((s) => s.stepId === "s3")?.description).toBe("言い換え");
+        expect(eventsOf("workspace:replanned")).toEqual(changedEvent(id));
+      });
+
+      it("gateResults に attempt があれば吸収しない", () => {
+        const { id, groupId } = running();
+        store.update(id, (w) => {
+          w.gateResults[0].attempts.push({ attempt: 1, checks: [] });
+        });
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephraseS3(groupId) });
+        expect(out.absorbed).toBe(false);
+        expect(out.scheduledSteps.find((s) => s.stepId === "s3")?.description).toBe("言い換え");
+        expect(eventsOf("workspace:replanned")).toEqual(changedEvent(id));
+      });
+
+      it("irregular: true の更新は吸収しない", () => {
+        const { id, groupId } = running();
+        const out = service.applyLedgerUpdate(groupId, { scheduledSteps: rephraseS3(groupId), irregular: true, reason: "変える" });
+        expect(out.absorbed).toBe(false);
+        expect(out.scheduledSteps.find((s) => s.stepId === "s3")?.description).toBe("言い換え");
+        expect(eventsOf("workspace:replanned")).toEqual(changedEvent(id));
+      });
     });
 
     it("work Step の変更・削除は workspace:replanned", () => {

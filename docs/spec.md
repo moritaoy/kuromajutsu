@@ -471,7 +471,7 @@ Magentic モードの台帳（Ledger）を更新する。Orchestrator Agent が�
 }
 ```
 
-`nextRunnableSteps` は `scheduledSteps` 指定時のみ含まれる。依存が全て resolved（completed/skipped）な pending ステップの一覧。
+`nextRunnableSteps` は、依存が全て resolved（completed/skipped）な pending ステップの一覧。台帳に `scheduledSteps` がある限り、`scheduledSteps` を省略した更新でも台帳の現在の `scheduledSteps` から算出して含まれる（台帳に `scheduledSteps` が無いときは含まれない）。
 
 **返却値（`type=progress` の場合）:**
 
@@ -482,6 +482,8 @@ Magentic モードの台帳（Ledger）を更新する。Orchestrator Agent が�
   "status": "updated"
 }
 ```
+
+`type=progress` の応答にも、`type=task` と同様に `nextRunnableSteps` が含まれる。Workspace グループで初回の再登録を吸収した場合（§13.5.5）は、`task` / `progress` のどちらの応答にも `"absorbed": true` と人が読める `note`（「承認済みの計画の文言を維持しました。手順を変えるときは追加・削除を含めるか、Progress Ledger を記録した後に行ってください」）が付く。吸収しなかった更新では `absorbed` / `note` は含まれない。
 
 **Workspace グループでの追加動作（§13.5.5）:**
 - ゲート（`kind: "gate"`）の変更・削除・緩和は、`irregular: true` と `reason` が無ければ拒否する（`GATE_CHANGE_NOT_ALLOWED`）。受理した場合は `GateChange` を記録し、`workspace:irregular` を配信する
@@ -2151,6 +2153,19 @@ Magentic では Orchestrator が実行中に計画を変えうる。変更の権
 
 実装方針: `update_ledger` は Gate への変更を検知し、`irregular` と `reason` が無ければ拒否する（`GATE_CHANGE_NOT_ALLOWED`）。最終ゲートの削除と、`human` チェックの削除・省略は `irregular` を付けても拒否する（`GATE_PROTECTED`）。受理した場合は `GateChange { id, gateId, before, after, reason, at }` を記録し、`workspace:irregular` イベントを WebSocket で配信する。完了レポートにもイレギュラーを一覧する（§13.11）。
 
+**初回の再登録の吸収:** 承認時にサーバーが Task Ledger を計画から登録する（§13.8.1）。Orchestrator が実行の開始直後に【Workspace 計画】を自分の言葉で書き直して `update_ledger` で送ると、全 Step が「変更」（`workspace:replanned`）になってしまう。これを防ぐため、プロンプトで「登録済み。最初に登録し直さない」と指示する（`MagenticConfig.ledgerPreloaded`。§13.8.2）うえで、サーバーでも次の条件で吸収する（保険）。プロンプトは最初の `update_ledger` を `type: "progress"` にするよう指示するため、**`type`（task / progress）では絞らない**。
+
+- 条件（**すべて**満たすとき）:
+  - Progress Ledger 未記録（`progressLedger` が無く、`progressHistory` も空 = 反復 0）
+  - 現在の台帳の全 Step が `pending`
+  - `gateResults` のどれにも attempt が無い
+  - `irregular` が真でない
+  - 追加・削除された Step が無い
+  - `phases` の構造（`id`・順序・`planning`・`final`・`fix`・`parentPhaseId`）が現在と同じ
+  - （Progress Ledger・全 pending・attempt・`irregular` は `WorkspaceRunner.applyLedgerUpdate` が判定し、追加・削除・`phases` の構造は `guardLedgerUpdate` が判定する）
+- 動作: 既存の全 Step の `role` / `description` / `doneCriteria` / `dependsOn`（work のみ）/ `phaseId` / `kind` と、フェーズの `name` / `goal` / `notes`（現在の台帳に同じ `id` のフェーズがあるもの）を **現在の台帳の値で上書き** してから差分を判定する。`replanned` が空になり `workspace:replanned` は出ず、台帳の文言は計画のまま残る。`status` は incoming の値を使う。何かを上書きしたとき、`update_ledger` の応答に `absorbed: true` と `note` を付ける（§2.2.11）。
+- 吸収しないもの: Step の追加・削除が 1 つでもある更新、`phases` の構造の変更、いずれかの Step が `in_progress` / `completed` / `skipped` になっているとき、ゲートの attempt があるとき、`irregular: true` の更新、Progress Ledger 記録後の更新（正当なリプランとして従来どおり扱う）。ゲートの `checks` / `onFail` の変更・`status` の保護・`irregular` の規則も従来どおり。
+
 #### 13.5.6 不合格時の差し戻し（Orchestrator が判断する）
 
 原則: **Orchestrator は実作業をしない**。原因の調査も修正もサブ Agent に任せ、Orchestrator は報告を読んで次の手を決めるだけにする。
@@ -2312,7 +2327,8 @@ Orchestrator のプロンプトに次を注入する。
 4. ゲート不合格時の原則: 自分では調査も修正もせず、原因の切り分け手順 → 修正（修正フェーズ）の順にサブ Agent へ委任する（§13.5.6）。`retryLimitExceeded` が返ったら作業を打ち切って終了する。
 5. ゲートの変更ルール: 通常は変更しない。必要なら `update_ledger` に `irregular: true` と `reason` を付ける。最終ゲートの削除・人間レビューの省略は不可（§13.5.5）。
 6. レビュー資料の作成依頼の仕方（ReviewDoc の形と標準の節。§13.6）。
-7. 既存の Orchestrator の原則（自分では作業しない、scope / constraints をサブ Agent のプロンプトに転記する、`maxIterations` に達したら途中経過を含めて `report_result` を呼ぶ）。
+7. Task Ledger は承認済みの計画で **登録済み**。**実行の開始直後（最初の反復）は** `update_ledger(type: "task")` で登録し直さず、最初の呼び出しは `type: "progress"` にする。手順を変えず status の更新も要らないときは `scheduledSteps` を省略し（応答の `nextRunnableSteps` は省略時も返る）、含めるときも変えない手順は受け取った内容（`description` / `doneCriteria` / `dependsOn`）をそのまま含める（言い換えない。§13.5.5）。再開時や手順の追加（直前計画・修正フェーズ）では、従来どおり `update_ledger(type: "task", phases, scheduledSteps)` を使う（既存の手順は言い換えない）。共通の台帳ルール（`buildMagenticOrchestratorPrompt`）も `ledgerPreloaded` のとき同じ趣旨に差し替わる（項目 1: 開始時は登録し直さない。項目 2: `scheduledSteps` は status が変わったときだけ含める）。再開プロンプトの Task Ledger にも「登録済み。再登録しない」を添える（§13.8.6）。
+8. 既存の Orchestrator の原則（自分では作業しない、scope / constraints をサブ Agent のプロンプトに転記する、`maxIterations` に達したら途中経過を含めて `report_result` を呼ぶ）。
 
 再開時（§13.8.4）は、これらに加えて再開プロンプト（§13.8.6）を注入する。
 

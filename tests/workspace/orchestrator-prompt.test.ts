@@ -64,6 +64,17 @@ describe("buildWorkspaceInjectionBlock", () => {
     expect(text).toContain(`report_result(status: "success", summary: "差し戻し上限超過で一時停止")`);
   });
 
+  it("Task Ledger は登録済みで、type: task で登録し直さず、手順を変えないなら scheduledSteps を省略する・言い換えない", () => {
+    expect(text).toContain("登録済み");
+    expect(text).toContain("実行の開始直後（最初の反復）は");
+    expect(text).toContain(`\`update_ledger(type: "task")\` で登録し直さず`);
+    expect(text).toContain(`最初の呼び出しは \`type: "progress"\``);
+    expect(text).toContain("`scheduledSteps` を省略する");
+    expect(text).toContain("言い換えない");
+    // 再開時・手順の追加では従来どおり type: task を使う
+    expect(text).toContain("再開時や手順の追加（直前計画・修正フェーズ）では、従来どおり");
+  });
+
   it("ゲートの変更ルール", () => {
     expect(text).toContain("irregular: true");
     expect(text).toContain("reason");
@@ -645,6 +656,27 @@ describe("buildResumePrompt", () => {
   it("承認 / 差し戻しでは人からの指示は「なし」", () => {
     const text = buildResumePrompt({ ...base, reason: { kind: "approved", gateId: "gate-P1" } });
     expect(text).toMatch(/人からの指示[^]*なし/);
+  });
+
+  it("Task Ledger があるときは「登録済み。再登録しない。手順を変えないなら scheduledSteps を省略」を添える", () => {
+    const text = buildResumePrompt({
+      ...base,
+      ledger: {
+        groupId: "grp-1739487600-b4e1",
+        taskLedger: {
+          facts: { given: [], toInvestigate: [], toDerive: [], assumptions: [] },
+          plan: [],
+          scheduledSteps: [],
+          createdAt: "2026-10-29T00:00:00.000Z",
+          updatedAt: "2026-10-29T00:00:00.000Z",
+        },
+        progressHistory: [],
+      } as unknown as MagenticLedger,
+      reason: { kind: "approved", gateId: "gate-P1" },
+    });
+    expect(text).toContain("Task Ledger は登録済み");
+    expect(text).toContain("登録し直さない");
+    expect(text).toContain("`scheduledSteps` を省略する");
   });
 
   it("ledger が無くても組み立てられる", () => {

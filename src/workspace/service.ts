@@ -253,7 +253,7 @@ export class WorkspaceService extends EventEmitter {
   applyLedgerUpdate(
     groupId: string,
     args: LedgerUpdateInput,
-  ): { phases: Phase[]; scheduledSteps: ScheduledStep[] } {
+  ): { phases: Phase[]; scheduledSteps: ScheduledStep[]; absorbed: boolean } {
     return this.runner.applyLedgerUpdate(groupId, args);
   }
 

@@ -188,6 +188,9 @@
 .ws-root .bd-h .cell.final .card{width:220px}
 .ws-root .card{background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:6px 9px 7px;cursor:pointer;position:relative;transition:border-color .15s, box-shadow .15s, opacity .15s;width:196px;flex:none}
 .ws-root .bd-h .card{width:206px}
+/* フェーズ帯ボード: カードは 196px を基準に、幅が足りなければ縮む / 折り返す */
+.ws-root .bd-p .card{flex:0 1 196px;min-width:150px;width:auto}
+.ws-root .bd-p .card .top, .ws-root .bd-p .card .ttl{overflow-wrap:anywhere}
 .ws-root .card:hover{border-color:var(--border-hover)}
 .ws-root .card.sel{border-color:var(--text-secondary);box-shadow:inset 2px 0 0 var(--accent-blue)}
 .ws-root .card.target{border-color:var(--accent-blue);box-shadow:0 0 0 1px var(--accent-blue)}
@@ -334,7 +337,7 @@
 .ws-root .gres .g{background:var(--bg-card);border:1px solid rgba(210,153,34,.5);border-radius:8px;padding:10px 12px}
 .ws-root .gres .g h4{font-size:13px;display:flex;justify-content:space-between}
 /* ドロワー（実行・完了画面の読み取り専用詳細） */
-.ws-root .drawer{position:fixed;top:0;right:0;bottom:0;width:430px;background:var(--bg-secondary);border-left:1px solid var(--border);z-index:50;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.4);font-family:var(--mono)}
+.ws-root .drawer{position:fixed;top:0;right:0;bottom:0;width:min(430px,100vw);background:var(--bg-secondary);border-left:1px solid var(--border);z-index:50;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.4);font-family:var(--mono)}
 .ws-root .drawer header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:center;font-size:12px}
 .ws-root .drawer .body{padding:14px 16px;overflow:auto;flex:1}
 .ws-root .drawer .live{margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:12px}
@@ -369,7 +372,7 @@
 .ws-root .overlay{position:fixed;inset:0;background:rgba(13,17,23,.6);z-index:60;display:grid;place-items:center}
 .ws-root .empty{color:var(--text-muted);font-size:13px}
 /* フェーズ帯ボード */
-.ws-root .board.bd-p{display:flex;flex-direction:column;gap:30px;padding:2px 4px 6px 30px;min-width:max-content}
+.ws-root .board.bd-p{display:flex;flex-direction:column;gap:30px;padding:2px 4px 6px 30px;width:100%;min-width:0}
 .ws-root .pband{position:relative;border:1px solid var(--border);border-left:3px solid var(--lc);border-radius:6px;background:rgba(255,255,255,.012)}
 .ws-root .pband.deferred{border-style:dashed;border-left-style:solid}
 .ws-root .pband.final{border-color:rgba(210,153,34,.45);border-left-color:var(--accent-yellow)}
@@ -386,6 +389,11 @@
 .ws-root .phuman{font-size:10.5px;color:var(--accent-blue)}
 .ws-root .psp{flex:1}
 .ws-root .pst{font-size:11px;color:var(--text-muted)}
+/* 折りたたみ（run モード） */
+.ws-root .ptg{width:14px;flex:none;padding:0;border:0;background:none;font:inherit;font-size:12px;line-height:1;text-align:center;color:var(--text-muted);cursor:pointer}
+.ws-root .ptg:hover{color:var(--text-primary)}
+.ws-root .pband.collapsed>.ph{border-bottom:0;border-radius:5px}
+.ws-root .bd-ctl{margin-left:auto;display:inline-flex;gap:6px}
 .ws-root .pst.done{color:var(--accent-green)}
 .ws-root .pst.active{color:var(--accent-blue)}
 .ws-root .pst.waiting{color:var(--accent-blue);font-weight:700}
@@ -393,7 +401,7 @@
 .ws-root .pband.target .ph .tg{color:var(--accent-blue)}
 .ws-root .pgoal{flex-basis:100%;font-size:11.5px;color:var(--text-muted);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Hiragino Sans',sans-serif}
 .ws-root .pbody{padding:16px 22px 14px;display:flex;flex-direction:column;gap:26px;align-items:center}
-.ws-root .prow{display:flex;gap:18px;justify-content:center;position:relative;z-index:2}
+.ws-root .prow{display:flex;flex-wrap:wrap;gap:26px 18px;justify-content:center;position:relative;z-index:2;width:100%}
 .ws-root .pdefer{border:1px dashed rgba(163,113,247,.6);border-radius:4px;padding:10px 14px;color:var(--text-secondary);font-size:12px;max-width:460px;background:rgba(163,113,247,.06);position:relative;z-index:2;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Hiragino Sans',sans-serif}
 .ws-root .pdefer b{color:var(--accent-purple);font-family:var(--mono)}
 .ws-root .pdefer ul{margin:6px 0 0 16px;color:var(--text-muted);font-size:11.5px}

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kuromajutsu — 実行タイムライン (Mock)</title>
+<style>
+:root {
+  --bg-primary:#0d1117; --bg-secondary:#161b22; --bg-card:#1c2128; --bg-hover:#222a33;
+  --text-primary:#e6edf3; --text-secondary:#8b949e; --text-muted:#6e7681;
+  --purple:#a371f7; --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922; --orange:#ffa657;
+  --border:#30363d; --border-hover:#484f58;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Hiragino Sans',sans-serif;background:var(--bg-primary);color:var(--text-primary);font-size:13px;line-height:1.45}
+button{font:inherit;color:inherit;cursor:pointer;background:transparent;border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--text-secondary)}
+button.on{color:var(--blue);border-color:var(--blue)}
+.wrap{max-width:1400px;margin:0 auto;padding:14px 18px 40px}
+.note{font-size:12px;color:var(--text-secondary);border:1px dashed var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px}
+.note b{color:var(--yellow)}
+
+/* ---- 実行画面の雰囲気（上部は省略表示） ---- */
+.runbar{display:flex;align-items:center;gap:12px;margin-bottom:10px;font-family:var(--mono);font-size:12px}
+.rb-title{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-weight:600;font-size:13px}
+.wbadge{font-size:11px;padding:1px 8px;border-radius:10px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-secondary)}
+.wbadge.live{color:var(--blue);border-color:var(--blue)}
+.meter{flex:1;min-width:160px;height:4px;border-radius:2px;background:var(--border);overflow:hidden}
+.meter>div{height:100%;background:linear-gradient(135deg,var(--purple),var(--blue))}
+.ghost{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;margin-bottom:14px}
+.ghost>div{border:1px dashed var(--border);border-radius:6px;min-height:150px;display:grid;place-items:center;color:var(--text-muted);font-size:12px;background:rgba(255,255,255,.01)}
+
+/* ---- タイムライン本体 ---- */
+.tl-box{background:var(--bg-card);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.tl-head{display:flex;align-items:center;gap:8px 12px;padding:7px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap;font-size:12px}
+.tl-head .t{font-weight:600}
+.tl-head .sum{font-family:var(--mono);color:var(--text-secondary);font-size:11px}
+.tl-head .sp{flex:1}
+.legend{display:flex;gap:10px;font-size:10.5px;color:var(--text-secondary);font-family:var(--mono)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.legend i.h{background:repeating-linear-gradient(135deg,var(--blue) 0 2px,transparent 2px 4px);border:1px solid var(--blue)}
+.legend i.r{background:repeating-linear-gradient(135deg,rgba(88,166,255,.9) 0 3px,rgba(88,166,255,.4) 3px 6px)}
+.tl-body{position:relative;max-height:260px;overflow:auto;scrollbar-width:thin;font-family:var(--mono);font-size:11px}
+.tl-body.short{max-height:220px}
+.tl-grid{display:grid;grid-template-columns:var(--lw,200px) minmax(0,1fr);position:relative}
+.axis{grid-column:1/-1;display:grid;grid-template-columns:var(--lw,200px) minmax(0,1fr);position:sticky;top:0;background:var(--bg-card);z-index:5;border-bottom:1px solid var(--border)}
+.axis .lbl{padding:4px 10px;color:var(--text-muted);font-size:10px}
+.axis .ticks{position:relative;height:20px}
+.tick{position:absolute;top:0;bottom:0;border-left:1px solid var(--border)}
+.tick span{position:absolute;top:3px;left:4px;font-size:10px;color:var(--text-muted);white-space:nowrap}
+.row{display:contents}
+.row .lbl{padding:0 10px;display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:1px solid rgba(48,54,61,.5);color:var(--text-secondary)}
+.row .trk{position:relative;overflow:hidden;border-bottom:1px solid rgba(48,54,61,.5);background-image:linear-gradient(90deg,rgba(48,54,61,.35) 1px,transparent 1px);background-size:var(--gs,10%) 100%}
+.row.phase .lbl{height:24px;color:var(--text-primary);font-weight:600;cursor:pointer}
+.row.phase .trk{height:24px}
+.row.phase.open .lbl,.row.phase.open .trk{background-color:rgba(255,255,255,.025)}
+.row.phase .lbl:hover{background:var(--bg-hover)}
+.row.step .lbl{height:18px;padding-left:22px}
+.row.step .trk{height:18px}
+.row.agent .lbl{height:15px;padding-left:36px;color:var(--text-muted);font-size:10px}
+.row.agent .trk{height:15px}
+.row.pending .lbl{color:var(--text-muted);font-weight:500}
+.tg{width:12px;color:var(--text-muted);font-size:10px;flex:none}
+.pid{font-size:10px;letter-spacing:.1em;color:var(--pc,var(--blue));font-weight:700;flex:none}
+.sid{color:var(--text-muted);font-weight:400;flex:none}
+.ttl{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Sans',sans-serif;font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.row.phase .ttl{font-size:12px}
+.row.step .ttl{font-size:11px;color:var(--text-secondary)}
+.dur{margin-left:auto;color:var(--text-muted);font-size:10px;flex:none}
+.st{font-size:10px;flex:none}
+.st.done{color:var(--green)}.st.run{color:var(--blue)}.st.wait{color:var(--blue);font-weight:700}.st.fail{color:var(--red)}
+.role{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--text-muted);flex:none}
+.role i{width:6px;height:6px;border-radius:50%;background:var(--rc)}
+
+/* バー */
+.bar{position:absolute;top:50%;transform:translateY(-50%);height:12px;border-radius:3px;background:var(--bc,#4d555e);opacity:.9;min-width:3px}
+.row.phase .bar{height:14px;border-radius:3px;background:rgba(255,255,255,.06);border:1px solid var(--pc);overflow:hidden;opacity:1}
+.row.phase .bar .seg{position:absolute;top:0;bottom:0;background:var(--bc);opacity:.85;border-right:1px solid rgba(13,17,23,.6)}
+.row.phase .bar .seg.gate{background:repeating-linear-gradient(135deg,rgba(210,153,34,.9) 0 3px,rgba(210,153,34,.5) 3px 6px)}
+.row.phase .bar .seg.human{background:repeating-linear-gradient(135deg,rgba(88,166,255,.75) 0 2px,transparent 2px 4px)}
+.row.phase .bar .seg.fix{background:repeating-linear-gradient(135deg,rgba(255,166,87,.9) 0 3px,rgba(255,166,87,.5) 3px 6px)}
+.row.step .bar{height:10px}
+.row.step .bar.gate{background:repeating-linear-gradient(135deg,rgba(210,153,34,.9) 0 3px,rgba(210,153,34,.55) 3px 6px)}
+.row.step .bar.human{background:repeating-linear-gradient(135deg,rgba(88,166,255,.75) 0 2px,transparent 2px 4px);border:1px solid var(--blue)}
+.row.step .bar.fix{background:repeating-linear-gradient(135deg,rgba(255,166,87,.9) 0 3px,rgba(255,166,87,.55) 3px 6px)}
+.row.agent .bar{height:7px;border-radius:2px;opacity:.75}
+.bar.run{background:repeating-linear-gradient(135deg,var(--bc) 0 6px,color-mix(in srgb,var(--bc) 55%,transparent) 6px 12px);background-size:17px 17px;animation:mv 1s linear infinite;border-right:2px solid var(--blue);opacity:1}
+.row.agent .bar.run{border-right-width:1px}
+@keyframes mv{to{background-position:17px 0}}
+.bar .in{position:absolute;left:5px;top:-1px;font-size:9.5px;color:#0d1117;font-weight:700;white-space:nowrap;overflow:hidden;max-width:calc(100% - 8px);text-overflow:ellipsis;line-height:14px}
+.row.agent .bar .in{display:none}
+.after{position:absolute;top:50%;transform:translateY(-50%);font-size:9.5px;color:var(--text-muted);white-space:nowrap;padding-left:6px}
+.after.run{color:var(--blue)}
+.after b{color:var(--text-secondary);font-weight:600}
+
+/* マーカー */
+.mk{position:absolute;top:50%;transform:translate(-50%,-50%);font-size:10px;line-height:1;z-index:2;cursor:default}
+.mk.gate{color:var(--yellow)}.mk.gate.pass{color:var(--green)}.mk.gate.fail{color:var(--red)}
+.mk.human{color:var(--blue)}
+.mk.irr{color:var(--red)}
+.mk.replan{color:var(--purple)}
+.mk.retry{color:var(--red);font-size:9px}
+.now{position:absolute;top:0;bottom:0;border-left:1px dashed var(--blue);z-index:4;pointer-events:none}
+.now span{position:absolute;top:2px;right:4px;font-size:9.5px;color:var(--blue);background:var(--bg-card);padding:0 3px;white-space:nowrap}
+.pend{position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);border-top:1px dashed var(--border);height:0}
+.pend span{position:absolute;left:calc(var(--nx) + 8px);top:-7px;font-size:10px;color:var(--text-muted);white-space:nowrap}
+
+/* ツールチップ */
+.tip{position:fixed;z-index:50;background:var(--bg-secondary);border:1px solid var(--border-hover);border-radius:6px;padding:8px 10px;font-size:11px;font-family:var(--mono);box-shadow:0 4px 12px rgba(0,0,0,.4);pointer-events:none;max-width:320px;display:none;color:var(--text-secondary)}
+.tip b{color:var(--text-primary);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Sans',sans-serif}
+.tip .k{color:var(--text-muted);display:inline-block;width:60px}
+
+/* 下段: 合計行（実行後） */
+.tl-foot{display:flex;gap:16px;padding:6px 12px;border-top:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--text-secondary)}
+.tl-foot b{color:var(--text-primary);font-weight:600}
+h3{font-size:13px;margin:26px 0 8px;color:var(--text-secondary);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="note"><b>モック</b> — 実行画面（RunView）の下に置く「実行タイムライン」の提案。横軸は経過時間。フェーズ 1 本 = 1 行。実行中・選択中のフェーズだけ手順と Agent の行に展開し、終わったフェーズは 1 本に畳む（▸ で開ける）。同時実行の Agent は縦に並ぶ。バーにホバーで詳細。上の「シナリオ」で 実行中 / 実行後 / 不合格ありを切り替え。</div>
+
+  <div class="runbar">
+    <span class="rb-title">JWT 認証 API の追加</span><span class="wbadge">rev 2</span><span class="wbadge live" id="livebadge">● RUNNING</span>
+    <div class="meter"><div style="width:38%"></div></div>
+    <span style="color:var(--text-secondary)">3/8 <small>DONE</small> &nbsp;2 <small>RUN</small> &nbsp;5/18 <small>ITER</small></span>
+  </div>
+  <div class="ghost"><div>計画表（既存。省略）</div><div>活動 / 進捗台帳 / ゲート / Agent（既存。省略）</div></div>
+
+  <div class="tl-box" id="tl"></div>
+
+  <h3>表示の規則（案）</h3>
+  <ul style="font-size:12px;color:var(--text-secondary);line-height:1.8;padding-left:18px">
+    <li><b style="color:var(--text-primary)">1 フェーズ = 1 行</b>。畳んだ行のバーは手順ごとの区切り（色は職種）、ゲート（斜線 黄）、人間レビュー待ち（斜線 青）、修正フェーズ（斜線 橙）を 1 本に収める。</li>
+    <li>展開すると <b style="color:var(--text-primary)">手順の行 → その手順を担当した Agent の行</b>。Agent の行は 1 Agent 1 行（並列は縦に並ぶ）。ラベルに職種・ツール回数・所要時間、ホバーでモデル・編集ファイル数・トークン。</li>
+    <li>自動規則: 実行中 / レビュー待ちのフェーズは展開、完了・未着手は畳む。手動で開閉したフェーズはその状態を優先（フェーズの状態が変わるまで）。計画表の選択（カードをクリック）と連動して該当フェーズを開く。</li>
+    <li>実行中のバーは右端の「now」線まで伸び、縞が流れる。未着手フェーズは点線の空行（時刻の見当は出さない）。</li>
+    <li>マーカー: ◆ ゲート（合格 緑 / 不合格 赤 / 実行中 黄）、👤 人間レビュー待ち（区間）、↻ 差し戻し、⚠ イレギュラー、⟲ リプラン。</li>
+    <li>高さ: 畳んだ行 24px、手順 18px、Agent 15px。本体は最大 260px（実行中は 200px）でスクロール。軸は上に固定。</li>
+    <li>実行後（完了レポート）: 同じ部品を「経過」の中に置き、全フェーズを畳んだ状態 + 合計行（所要 / Agent 数 / ツール回数 / トークン）で出す。</li>
+  </ul>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+// ------------------------------------------------------------
+// サンプルデータ（秒）。実装では ledger / gateResults / humanReviews / agents から組み立てる
+// ------------------------------------------------------------
+const ROLE = {
+  orchestrator:'#a371f7', research:'#d29922', design:'#58a6ff', 'impl-code':'#3fb950', 'impl-test':'#7ee787',
+  'code-review':'#f778ba', 'text-writer':'#56d4dd', 'text-review':'#db61a2', 'quick-task':'#ffa657',
+};
+const MODEL = { research:'sonnet', design:'opus', 'impl-code':'composer-2.5', 'impl-test':'composer-2.5-fast', 'code-review':'sonnet', 'text-writer':'haiku' };
+const PC = ['#58a6ff','#3fb950','#7ee787','#56d4dd','#a371f7','#f778ba'];
+
+function ag(role, s, e, tools, extra) { return Object.assign({ id: `${role}-${(1000 + s).toString(36)}`, role, start: s, end: e, tools, model: MODEL[role] || 'sonnet', files: Math.max(0, Math.round(tools / 6)), tokens: tools * 2100 }, extra || {}); }
+
+// --- シナリオ 1: 実行中（now = 1060s）---
+const RUNNING = {
+  now: 1060, status: 'running',
+  phases: [
+    { id:'P1', name:'調査・設計', state:'done', start:0, end:470, steps:[
+      { id:'s1', title:'既存コードの調査', role:'research', start:4, end:190, agents:[ ag('research', 6, 188, 34) ] },
+      { id:'s2', title:'認証アーキテクチャと API 仕様の設計', role:'design', start:196, end:372, agents:[ ag('design', 198, 370, 19) ] },
+      { id:'gate-P1', kind:'gate', title:'設計レビュー', role:'code-review', start:376, end:470, human:true,
+        agents:[ ag('code-review', 378, 402, 11), ag('text-writer', 404, 426, 6) ], humanWait:[428, 470], gates:[{ at:402, pass:true }] },
+    ]},
+    { id:'P2', name:'実装', state:'active', start:474, steps:[
+      { id:'s3', title:'認証ミドルウェアの実装', role:'impl-code', start:480, end:842, agents:[ ag('impl-code', 482, 840, 41) ] },
+      { id:'s4', title:'ミドルウェアのテスト', role:'impl-test', start:480, agents:[ ag('impl-test', 484, null, 27) ] },
+      { id:'s5', title:'ログイン / リフレッシュ API の実装', role:'impl-code', start:846, agents:[ ag('impl-code', 848, null, 18), ag('research', 850, 905, 7, { note:'既存ルートの確認（追加委任）' }) ] },
+      { id:'gate-P2', kind:'gate', title:'実装レビュー + テスト', role:'code-review', pending:true },
+    ]},
+    { id:'P3', name:'ドキュメント・仕上げ', state:'pending', deferred:true, steps:[] },
+    { id:'FINAL', name:'完了確認', state:'pending', final:true, steps:[] },
+  ],
+};
+
+// --- シナリオ 2: 実行後（完了。全部畳む）---
+const DONE = {
+  now: 1640, status: 'done',
+  phases: [
+    RUNNING.phases[0],
+    { id:'P2', name:'実装', state:'done', start:474, end:1180, steps:[
+      { id:'s3', title:'認証ミドルウェアの実装', role:'impl-code', start:480, end:842, agents:[ ag('impl-code', 482, 840, 41) ] },
+      { id:'s4', title:'ミドルウェアのテスト', role:'impl-test', start:480, end:900, agents:[ ag('impl-test', 484, 898, 33) ] },
+      { id:'s5', title:'ログイン / リフレッシュ API の実装', role:'impl-code', start:846, end:1090, agents:[ ag('impl-code', 848, 1088, 29), ag('research', 850, 905, 7) ] },
+      { id:'gate-P2', kind:'gate', title:'実装レビュー + テスト', role:'code-review', start:1094, end:1180, agents:[ ag('code-review', 1096, 1150, 14) ], gates:[{ at:1180, pass:true }] },
+    ]},
+    { id:'P3', name:'ドキュメント・仕上げ', state:'done', start:1184, end:1480, planned:true, steps:[
+      { id:'d1', title:'README に使い方を追記', role:'text-writer', start:1190, end:1330, agents:[ ag('text-writer', 1192, 1328, 9) ] },
+      { id:'gate-P3', kind:'gate', title:'文章レビュー', role:'text-review', start:1334, end:1480, agents:[ ag('text-review', 1336, 1372, 8) ], gates:[{ at:1372, pass:false }, { at:1478, pass:true }],
+        fix:{ start:1376, end:1456, title:'指摘の反映', agents:[ ag('text-writer', 1378, 1454, 6) ] } },
+    ]},
+    { id:'FINAL', name:'完了確認', state:'done', final:true, start:1484, end:1640, steps:[
+      { id:'gate-final', kind:'gate', title:'最終確認（npm test / build）', role:'code-review', start:1484, end:1640, agents:[ ag('code-review', 1500, 1600, 12) ], gates:[{ at:1636, pass:true }] },
+    ]},
+  ],
+};
+
+// --- シナリオ 3: 実行中・差し戻しあり（P2 のゲート不合格 → 修正フェーズ）---
+const REWORK = {
+  now: 1420, status: 'running',
+  phases: [
+    RUNNING.phases[0],
+    { id:'P2', name:'実装', state:'active', start:474, steps:[
+      ...DONE.phases[1].steps.slice(0, 3),
+      { id:'gate-P2', kind:'gate', title:'実装レビュー + テスト', role:'code-review', start:1094, agents:[ ag('code-review', 1096, 1150, 14) ], gates:[{ at:1150, pass:false }],
+        fix:{ start:1156, title:'原因の切り分け → 修正', agents:[ ag('code-review', 1158, 1210, 9, { note:'triage' }), ag('impl-code', 1214, null, 16) ] }, irregular:1236 },
+    ]},
+    { id:'P3', name:'ドキュメント・仕上げ', state:'pending', deferred:true, steps:[] },
+    { id:'FINAL', name:'完了確認', state:'pending', final:true, steps:[] },
+  ],
+};
+
+const SCEN = { running: RUNNING, done: DONE, rework: REWORK };
+let scen = 'running';
+let showAgents = true;
+const manual = new Map(); // phaseId -> bool（手動の開閉）
+
+// ------------------------------------------------------------
+function fmt(s) { if (s == null) return ''; const m = Math.floor(s / 60), r = Math.round(s % 60); return m ? `${m}分${r ? ' ' + r + '秒' : ''}` : `${r}秒`; }
+function clock(s) { const base = 9 * 3600 + 12 * 60; const t = base + s; return `${Math.floor(t / 3600)}:${String(Math.floor(t / 60) % 60).padStart(2, '0')}`; }
+function isOpen(p) { if (manual.has(p.id)) return manual.get(p.id); return p.state === 'active' || p.state === 'waiting'; }
+function endOf(x, now) { return x.end ?? now; }
+
+function render() {
+  const d = SCEN[scen];
+  const now = d.now;
+  const total = Math.max(now, ...d.phases.map(p => p.end || 0)) * (d.status === 'done' ? 1.03 : 1.22);
+  const X = (s) => `${(s / total * 100).toFixed(3)}%`;
+  const W = (s, e) => `${(Math.max(e - s, 0) / total * 100).toFixed(3)}%`;
+  const root = document.getElementById('tl');
+  const sumAgents = d.phases.flatMap(p => p.steps.flatMap(s => [...(s.agents || []), ...((s.fix && s.fix.agents) || [])]));
+  const tools = sumAgents.reduce((a, b) => a + b.tools, 0);
+  const tokens = sumAgents.reduce((a, b) => a + b.tokens, 0);
+  document.getElementById('livebadge').textContent = d.status === 'done' ? '✓ DONE' : '● RUNNING';
+
+  let h = `<div class="tl-head">
+    <span class="t">実行タイムライン</span>
+    <span class="sum">${d.status === 'done' ? '所要' : '経過'} ${fmt(now)} · Agent ${sumAgents.length} · ツール ${tools} 回</span>
+    <span class="sp"></span>
+    <span class="legend"><span><i style="background:${ROLE['impl-code']}"></i>手順（色=職種）</span><span><i class="r"></i>実行中</span><span><i style="background:repeating-linear-gradient(135deg,#d29922 0 3px,rgba(210,153,34,.5) 3px 6px)"></i>ゲート</span><span><i class="h"></i>👤 レビュー待ち</span><span><i style="background:repeating-linear-gradient(135deg,#ffa657 0 3px,rgba(255,166,87,.5) 3px 6px)"></i>修正</span></span>
+    <button class="${showAgents ? 'on' : ''}" data-act="agents">Agent 行</button>
+    <button data-act="all">すべて展開</button><button data-act="none">すべて畳む</button>
+    <span style="color:var(--text-muted);font-size:10px;margin-left:6px">シナリオ:</span>
+    ${['running:実行中', 'rework:差し戻しあり', 'done:実行後'].map(x => { const [k, l] = x.split(':'); return `<button class="${scen === k ? 'on' : ''}" data-scen="${k}">${l}</button>`; }).join('')}
+  </div>`;
+
+  // 軸
+  const step = total > 1500 ? 300 : total > 600 ? 120 : 60;
+  const ticks = [];
+  for (let t = 0; t < total; t += step) ticks.push(`<div class="tick" style="left:${X(t)}"><span>${clock(t)} <em style="color:var(--border-hover);font-style:normal">+${Math.round(t / 60)}m</em></span></div>`);
+  h += `<div class="tl-body ${d.status === 'done' ? '' : 'short'}"><div class="tl-grid" style="--gs:${(step / total * 100).toFixed(3)}%">
+    <div class="axis"><div class="lbl">フェーズ / 手順 / Agent</div><div class="ticks">${ticks.join('')}</div></div>`;
+
+  d.phases.forEach((p, i) => {
+    const pc = p.final ? 'var(--yellow)' : PC[i % PC.length];
+    const open = isOpen(p) && p.steps.length > 0;
+    const pend = p.state === 'pending';
+    const pe = endOf(p, now);
+    const st = p.state === 'done' ? `<span class="st done">✓ ${fmt(p.end - p.start)}</span>` : p.state === 'active' ? `<span class="st run">▶ ${fmt(now - p.start)}</span>` : `<span class="st" style="color:var(--text-muted)">— 待機</span>`;
+    h += `<div class="row phase ${p.state} ${open ? 'open' : ''}" style="--pc:${pc}">
+      <div class="lbl" data-toggle="${p.id}"><span class="tg">${p.steps.length ? (open ? '▾' : '▸') : ''}</span><span class="pid">${p.final ? 'FINAL' : p.id}</span><span class="ttl">${p.name}</span>${p.deferred && pend ? '<span class="st" style="color:var(--purple)">直前計画</span>' : ''}<span class="dur">${st}</span></div>
+      <div class="trk">`;
+    if (pend) {
+      h += `<div class="pend" style="--nx:${X(now)}"><span>${p.deferred ? '手順は前フェーズの後に決定' : '待機'}</span></div>`;
+    } else {
+      // 畳んだ 1 本のバー: 手順ごとのセグメント
+      h += `<div class="bar" style="left:${X(p.start)};width:${W(p.start, pe)}" data-tip="phase:${p.id}">`;
+      const span = pe - p.start;
+      const seg = (s, e, cls, color) => `<div class="seg ${cls}" style="left:${((s - p.start) / span * 100).toFixed(2)}%;width:${((Math.max(e, s) - s) / span * 100).toFixed(2)}%;--bc:${color}"></div>`;
+      for (const s of p.steps) {
+        if (s.pending) continue;
+        const se = endOf(s, now);
+        if (s.kind === 'gate') {
+          h += seg(s.start, se, 'gate', 'var(--yellow)');
+          if (s.humanWait) h += seg(s.humanWait[0], s.humanWait[1], 'human', 'var(--blue)');
+          if (s.fix) h += seg(s.fix.start, endOf(s.fix, now), 'fix', 'var(--orange)');
+        } else h += seg(s.start, se, '', ROLE[s.role]);
+      }
+      h += `</div>`;
+      // マーカー
+      for (const s of p.steps) {
+        for (const g of s.gates || []) h += `<span class="mk gate ${g.pass ? 'pass' : 'fail'}" style="left:${X(g.at)}" data-tip="gate:${p.id}:${s.id}:${g.at}">◆</span>`;
+        if (s.humanWait) h += `<span class="mk human" style="left:${X((s.humanWait[0] + s.humanWait[1]) / 2)}" data-tip="human:${p.id}:${s.id}">👤</span>`;
+        if (s.irregular) h += `<span class="mk irr" style="left:${X(s.irregular)}" data-tip="irr:${p.id}:${s.id}">⚠</span>`;
+      }
+      if (p.planned) h += `<span class="mk replan" style="left:${X(p.start)}" data-tip="replan:${p.id}">⟲</span>`;
+      if (!open && p.state === 'active') {
+        const running = p.steps.filter(s => !s.pending && s.end == null && s.kind !== 'gate');
+        h += `<span class="after run" style="left:${X(pe)}">${running.map(s => s.id).join(' · ')} 実行中 · Agent ${p.steps.flatMap(s => (s.agents || []).filter(a => a.end == null)).length}</span>`;
+      }
+    }
+    h += `</div></div>`;
+
+    if (!open) return;
+    for (const s of p.steps) {
+      const sc = s.kind === 'gate' ? 'var(--yellow)' : ROLE[s.role];
+      const se = s.pending ? null : endOf(s, now);
+      const running = !s.pending && s.end == null;
+      const stt = s.pending ? '<span class="st" style="color:var(--text-muted)">待機</span>' : running ? `<span class="st run">${fmt(now - s.start)}</span>` : (s.gates && !s.gates[s.gates.length - 1].pass) ? `<span class="st fail">不合格</span>` : `<span class="st done">${fmt(s.end - s.start)}</span>`;
+      h += `<div class="row step ${s.pending ? 'pending' : ''}"><div class="lbl"><span class="sid">${s.kind === 'gate' ? '◆' : ''} ${s.id}</span><span class="ttl">${s.title}</span><span class="dur">${stt}</span></div><div class="trk">`;
+      if (s.pending) h += `<div class="pend" style="--nx:${X(now)}"><span>依存の完了待ち</span></div>`;
+      else {
+        h += `<div class="bar ${s.kind === 'gate' ? 'gate' : ''} ${running && s.kind !== 'gate' ? 'run' : ''}" style="left:${X(s.start)};width:${W(s.start, se)};--bc:${sc}" data-tip="step:${p.id}:${s.id}"></div>`;
+        if (s.humanWait) h += `<div class="bar human" style="left:${X(s.humanWait[0])};width:${W(s.humanWait[0], s.humanWait[1])}" data-tip="human:${p.id}:${s.id}"></div>`;
+        if (s.fix) h += `<div class="bar fix ${s.fix.end == null ? 'run' : ''}" style="left:${X(s.fix.start)};width:${W(s.fix.start, endOf(s.fix, now))};--bc:var(--orange)" data-tip="fix:${p.id}:${s.id}"></div>`;
+        for (const g of s.gates || []) h += `<span class="mk gate ${g.pass ? 'pass' : 'fail'}" style="left:${X(g.at)}" data-tip="gate:${p.id}:${s.id}:${g.at}">◆</span>`;
+        if (s.irregular) h += `<span class="mk irr" style="left:${X(s.irregular)}" data-tip="irr:${p.id}:${s.id}">⚠</span>`;
+        if (running && s.kind !== 'gate') h += `<span class="after run" style="left:${X(se)}">Agent ${(s.agents || []).filter(a => a.end == null).length} 実行中</span>`;
+      }
+      h += `</div></div>`;
+      if (!showAgents) continue;
+      const agents = [...(s.agents || []), ...((s.fix && s.fix.agents) || [])];
+      for (const a of agents) {
+        const ae = endOf(a, now);
+        const run = a.end == null;
+        h += `<div class="row agent"><div class="lbl"><span class="role" style="--rc:${ROLE[a.role]}"><i></i>${a.role}</span><span style="color:var(--text-muted)">${a.model}</span>${a.note ? `<span class="ttl" style="color:var(--text-muted)">${a.note}</span>` : ''}<span class="dur">ツール ${a.tools}${run ? '…' : ''} · ${fmt(ae - a.start)}</span></div>
+          <div class="trk"><div class="bar ${run ? 'run' : ''}" style="left:${X(a.start)};width:${W(a.start, ae)};--bc:${ROLE[a.role]}" data-tip="agent:${a.id}"></div>${run ? `<span class="after run" style="left:${X(ae)}">◔ ${a.tools} tools</span>` : ''}</div></div>`;
+      }
+    }
+  });
+
+  if (d.status !== 'done') h += `<div class="now" style="left:calc(var(--lw,200px) + (100% - var(--lw,200px)) * ${(now / total).toFixed(4)})"><span>now ${clock(now)}</span></div>`;
+  h += `</div></div>`;
+  if (d.status === 'done') h += `<div class="tl-foot"><span>所要 <b>${fmt(now)}</b></span><span>Agent <b>${sumAgents.length}</b></span><span>ツール <b>${tools}</b> 回</span><span>トークン <b>${(tokens / 1000).toFixed(0)}k</b></span><span>ゲート <b>5</b>（不合格 1）</span><span>人間レビュー <b>1</b></span></div>`;
+  root.innerHTML = h;
+  root.style.setProperty('--lw', '220px');
+  root.querySelector('.tl-grid').style.setProperty('--lw', '220px');
+  root.querySelector('.axis').style.setProperty('--lw', '220px');
+  root.querySelectorAll('.now').forEach(n => n.style.setProperty('--lw', '220px'));
+}
+
+// ------------------------------------------------------------
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-toggle]');
+  if (t) { const id = t.dataset.toggle; const p = SCEN[scen].phases.find(x => x.id === id); if (p.steps.length) { manual.set(id, !isOpen(p)); render(); } return; }
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.scen) { scen = b.dataset.scen; manual.clear(); render(); }
+  else if (b.dataset.act === 'agents') { showAgents = !showAgents; render(); }
+  else if (b.dataset.act === 'all') { SCEN[scen].phases.forEach(p => manual.set(p.id, true)); render(); }
+  else if (b.dataset.act === 'none') { SCEN[scen].phases.forEach(p => manual.set(p.id, false)); render(); }
+});
+
+const tip = document.getElementById('tip');
+function findStep(pid, sid) { const p = SCEN[scen].phases.find(x => x.id === pid); return [p, p.steps.find(s => s.id === sid)]; }
+document.addEventListener('mousemove', (e) => {
+  const el = e.target.closest('[data-tip]');
+  if (!el) { tip.style.display = 'none'; return; }
+  const now = SCEN[scen].now;
+  const [kind, a, b, c] = el.dataset.tip.split(':');
+  let html = '';
+  if (kind === 'phase') { const p = SCEN[scen].phases.find(x => x.id === a); const ags = p.steps.flatMap(s => s.agents || []); html = `<b>${p.id} ${p.name}</b><br><span class="k">所要</span>${fmt(endOf(p, now) - p.start)}${p.end == null ? '（実行中）' : ''}<br><span class="k">手順</span>${p.steps.filter(s => !s.pending).length}/${p.steps.length}<br><span class="k">Agent</span>${ags.length} · ツール ${ags.reduce((x, y) => x + y.tools, 0)} 回`; }
+  else if (kind === 'step') { const [, s] = findStep(a, b); html = `<b>${s.id} ${s.title}</b><br><span class="k">職種</span>${s.role}<br><span class="k">開始</span>${clock(s.start)}<br><span class="k">所要</span>${fmt(endOf(s, now) - s.start)}${s.end == null ? '（実行中）' : ''}<br><span class="k">Agent</span>${(s.agents || []).length}`; }
+  else if (kind === 'agent') { const ag = SCEN[scen].phases.flatMap(p => p.steps.flatMap(s => [...(s.agents || []), ...((s.fix && s.fix.agents) || [])])).find(x => x.id === a); html = `<b>${ag.id}</b><br><span class="k">職種</span>${ag.role} · ${ag.model}<br><span class="k">所要</span>${fmt(endOf(ag, now) - ag.start)}${ag.end == null ? '（実行中）' : ''}<br><span class="k">ツール</span>${ag.tools} 回<br><span class="k">ファイル</span>編集 ${ag.files}<br><span class="k">トークン</span>${(ag.tokens / 1000).toFixed(1)}k`; }
+  else if (kind === 'gate') { const [, s] = findStep(a, b); const g = s.gates.find(x => String(x.at) === c); html = `<b>◆ ${s.title}</b><br><span class="k">結果</span>${g.pass ? '<span style="color:var(--green)">合格</span>' : '<span style="color:var(--red)">不合格 → 修正へ</span>'}<br><span class="k">時刻</span>${clock(g.at)}`; }
+  else if (kind === 'human') { const [, s] = findStep(a, b); html = `<b>👤 人間レビュー待ち</b><br><span class="k">ゲート</span>${s.id} ${s.title}<br><span class="k">待ち時間</span>${fmt(s.humanWait[1] - s.humanWait[0])}（反復には数えない）`; }
+  else if (kind === 'fix') { const [, s] = findStep(a, b); html = `<b>↩ 修正フェーズ</b><br><span class="k">元ゲート</span>${s.id}<br><span class="k">内容</span>${s.fix.title}<br><span class="k">所要</span>${fmt(endOf(s.fix, now) - s.fix.start)}`; }
+  else if (kind === 'irr') html = `<b>⚠ イレギュラー</b><br>ゲートのチェックが AI により変更されました（要確認）`;
+  else if (kind === 'replan') html = `<b>⟲ 直前計画</b><br>このフェーズの手順は開始直前に Orchestrator が決めました`;
+  tip.innerHTML = html;
+  tip.style.display = 'block';
+  const x = Math.min(e.clientX + 14, window.innerWidth - 340), y = Math.min(e.clientY + 14, window.innerHeight - 120);
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+});
+
+render();
+</script>
+</body>
+</html>

@@ -6,7 +6,7 @@
 
 import { createElement as h, useRef, useLayoutEffect, useState, useMemo } from "react";
 import {
-  computeLevels, phaseRows, phaseState, stepsOf, workOf, gateOf, fixesOf, stepById, phaseById,
+  computeLevels, phaseRows, phaseState, phaseSummary, stepsOf, workOf, gateOf, fixesOf, stepById, phaseById,
   isHuman, roleInfo, MARK_LABEL, PHASE_COLORS, PHASE_STATE_LABEL,
 } from "./plan-utils.js";
 
@@ -82,6 +82,9 @@ function StepCard({ step: s, mode, config, isFinal, isTarget, isSelected, lit, o
 function PhaseBand({ p, idx, ctx }) {
   const { model, mode, config, levels, targets, selectedId, hover, lit, onPhaseClick, onStepClick, onHover } = ctx;
   const review = mode === "review";
+  // 折りたたみは run モードだけ（review / view は常に展開）
+  const open = mode !== "run" || ctx.isOpen(p);
+  const sum = mode === "run" && !open ? phaseSummary(model, p) : null;
   const g = gateOf(model, p.id);
   const rows = phaseRows(model, p.id, levels);
   const st = mode === "run" ? phaseState(model, p) : null;
@@ -98,6 +101,11 @@ function PhaseBand({ p, idx, ctx }) {
     onClick: () => onPhaseClick(p.id),
     title: review ? "クリック: このフェーズを指示の対象に追加 / 解除" : "クリック: 詳細",
   },
+    mode === "run" && h("button", {
+      type: "button", className: "ptg", "aria-expanded": open, title: open ? "畳む" : "展開",
+      // 見出しのクリック（フェーズ詳細の選択）は壊さない
+      onClick: (e) => { e.stopPropagation(); ctx.onToggle(p.id); },
+    }, open ? "▾" : "▸"),
     h("span", { className: "pidx" }, idx),
     h("span", { className: "pnm" }, p.name),
     !p.final && !fx && h("span", { className: `pmode ${p.planning}` },
@@ -107,11 +115,15 @@ function PhaseBand({ p, idx, ctx }) {
     p.mark && !fx && h("span", { className: `tag ${p.mark}` }, MARK_LABEL[p.mark]),
     h("span", { className: "psp" }),
     st && ss.length > 0 && h("span", { className: "pst" }, `${doneN}/${ss.length}`),
+    sum && h("span", { className: "pst" }, `ゲート: ${sum.gate}`),
+    sum && sum.running && h("span", { className: "pst active", title: `${sum.running.id} が実行中` },
+      `実行中: ${sum.running.id} ${sum.running.title}`, sum.runningCount > 1 ? ` ほか ${sum.runningCount - 1}` : ""),
     st && h("span", { className: `pst ${st}` }, PHASE_STATE_LABEL[st]),
     review && h("span", { className: "tg" }, isT ? "◉" : "○"),
     p.goal && h("div", { className: "pgoal" }, p.goal));
 
-  const body = h("div", { className: "pbody" },
+  // 畳んだフェーズは本体を描かない（display:none ではない）。drawEdges は C[id] の無い辺を除外する
+  const body = !open ? null : h("div", { className: "pbody" },
     unplanned
       ? h("div", { className: "pdefer", "data-anchor": `defer-${p.id}` },
         h("div", null, h("b", null, "未決定"), " — このフェーズの開始直前に、前フェーズの成果を見て Orchestrator が手順を決めます"),
@@ -131,7 +143,7 @@ function PhaseBand({ p, idx, ctx }) {
       })));
 
   return h("section", {
-    className: ["pband", p.final ? "final" : "", fx ? "fixband" : "", p.planning, st || "", isT ? "target" : "", selectedId === p.id ? "psel" : ""].filter(Boolean).join(" "),
+    className: ["pband", p.final ? "final" : "", fx ? "fixband" : "", open ? "" : "collapsed", p.planning, st || "", isT ? "target" : "", selectedId === p.id ? "psel" : ""].filter(Boolean).join(" "),
     "data-phase": p.id,
     style: { "--lc": color },
   }, head, body);
@@ -195,14 +207,31 @@ function drawEdges(board, svg, model, hoverSets) {
   if (!board || !svg) return;
   const br = board.getBoundingClientRect();
   const box = (el) => { const r = el.getBoundingClientRect(); return { x0: r.left - br.left, x1: r.right - br.left, y0: r.top - br.top, y1: r.bottom - br.top }; };
-  const rowEls = [...board.querySelectorAll(".prow, .pdefer")];
-  const rowBox = rowEls.map(box);
-  const rowBand = rowEls.map((el) => el.closest(".pband"));
-  const rowOf = Object.create(null);
-  rowEls.forEach((el, i) => {
-    if (el.classList.contains("pdefer")) rowOf[el.dataset.anchor] = i;
-    else el.querySelectorAll(".card[data-step]").forEach((c) => { rowOf[c.dataset.step] = i; });
+  // 「行」= 視覚的な 1 段。.prow は flex-wrap で折り返すと 2 段以上になるので、
+  // カードの上端（4px 以内は同じ段）でグルーピングし、段ごとに仮想の行として扱う。.pdefer は 1 行
+  const rows = [];
+  board.querySelectorAll(".prow, .pdefer").forEach((el) => {
+    const band = el.closest(".pband");
+    if (el.classList.contains("pdefer")) {
+      rows.push({ box: box(el), band, ids: [el.dataset.anchor] });
+      return;
+    }
+    const cards = [...el.querySelectorAll(".card[data-step]")].map((c) => ({ id: c.dataset.step, b: box(c) })).sort((p, q) => p.b.y0 - q.b.y0);
+    let cur = null;
+    for (const c of cards) {
+      if (!cur || c.b.y0 - cur.top > 4) {
+        cur = { top: c.b.y0, box: { ...c.b }, band, ids: [c.id] };
+        rows.push(cur);
+      } else {
+        cur.box = { x0: Math.min(cur.box.x0, c.b.x0), x1: Math.max(cur.box.x1, c.b.x1), y0: Math.min(cur.box.y0, c.b.y0), y1: Math.max(cur.box.y1, c.b.y1) };
+        cur.ids.push(c.id);
+      }
+    }
   });
+  const rowBox = rows.map((r) => r.box);
+  const rowBand = rows.map((r) => r.band);
+  const rowOf = Object.create(null);
+  rows.forEach((r, i) => r.ids.forEach((id) => { rowOf[id] = i; }));
   const C = Object.create(null);
   board.querySelectorAll(".card[data-step]").forEach((el) => { C[el.dataset.step] = box(el); });
   board.querySelectorAll(".pdefer").forEach((el) => { C[el.dataset.anchor] = box(el); });
@@ -300,9 +329,11 @@ function focusSets(model, id) {
  *   model: object, config: object, mode: "review" | "run" | "view",
  *   targets?: string[], selectedId?: string|null,
  *   onToggleTarget?: (id: string) => void, onSelect?: (id: string) => void,
+ *   collapseRequest?: { kind: "all" | "none", seq: number },
  * }} props
+ * collapseRequest: seq が変わるたびに、全フェーズを展開（kind "all"）/ 畳む（kind "none"）に手動設定する（run モードのみ）
  */
-export function PlanBoard({ model, config, mode, targets = [], selectedId = null, onToggleTarget, onSelect }) {
+export function PlanBoard({ model, config, mode, targets = [], selectedId = null, onToggleTarget, onSelect, collapseRequest = null }) {
   const boardRef = useRef(null);
   const svgRef = useRef(null);
   const [hover, setHover] = useState(null);
@@ -313,7 +344,59 @@ export function PlanBoard({ model, config, mode, targets = [], selectedId = null
   const mainOrder = model.phases.filter((p) => !p.parentPhaseId && !p.final).map((p) => p.id);
 
   const review = mode === "review";
+
+  // --- フェーズの折りたたみ（run モードのみ） ---
+  // 手動の開閉: Map<phaseId, boolean>（true = 開く）。手動があれば自動規則より優先する
+  const [manual, setManual] = useState(() => new Map());
+  // 前回描画時の phaseState。変わったフェーズの手動状態は解除して自動規則に戻す
+  const prevStates = useRef(new Map());
+  const handledSeq = useRef(collapseRequest ? collapseRequest.seq : 0);
+  const stateOf = useMemo(() => {
+    const m = new Map();
+    if (mode === "run") model.phases.forEach((p) => m.set(p.id, phaseState(model, p)));
+    return m;
+  }, [model, mode]);
+  const selStep = mode === "run" && selectedId ? stepById(model, selectedId) : null;
+  const selPhase = selStep ? selStep.phaseId : null;
+  /** 自動規則: 実行中 / レビュー待ち、選択中の手順を含む、入れ子の修正フェーズのどれかが自動で開く */
+  const autoOpen = (p) => {
+    const st = stateOf.get(p.id);
+    return st === "active" || st === "waiting" || p.id === selPhase || fixesOf(model, p.id).some(autoOpen);
+  };
+  const isOpen = (p) => (manual.has(p.id) ? manual.get(p.id) : autoOpen(p));
+
+  useLayoutEffect(() => {
+    if (mode !== "run") return;
+    const prev = prevStates.current;
+    const stale = [];
+    stateOf.forEach((st, id) => { if (prev.has(id) && prev.get(id) !== st) stale.push(id); });
+    prevStates.current = new Map(stateOf);
+    if (stale.some((id) => manual.has(id))) {
+      setManual((m) => { const n = new Map(m); stale.forEach((id) => n.delete(id)); return n; });
+    }
+  }, [stateOf]);
+
+  // 選択した手順（ログやゲート一覧から選ぶ場合を含む）のフェーズは、手動で畳んでいても開き直す
+  useLayoutEffect(() => {
+    if (!selPhase) return;
+    const ids = [];
+    for (let p = phaseById(model, selPhase); p; p = p.parentPhaseId ? phaseById(model, p.parentPhaseId) : null) ids.push(p.id);
+    setManual((m) => (ids.some((id) => m.has(id)) ? new Map([...m].filter(([id]) => !ids.includes(id))) : m));
+  }, [selectedId]);
+
+  useLayoutEffect(() => {
+    if (!collapseRequest || collapseRequest.seq === handledSeq.current) return;
+    handledSeq.current = collapseRequest.seq;
+    const open = collapseRequest.kind === "all";
+    setManual(new Map(model.phases.map((p) => [p.id, open])));
+  }, [collapseRequest]);
+
   const ctx = {
+    isOpen,
+    onToggle: (id) => setManual((m) => {
+      const p = phaseById(model, id);
+      return p ? new Map(m).set(id, !(m.has(id) ? m.get(id) : autoOpen(p))) : m;
+    }),
     model, mode, config, levels, targets, selectedId, hover, lit, mainOrder,
     onPhaseClick: (id) => (review && onToggleTarget ? onToggleTarget(id) : onSelect && onSelect(id)),
     onStepClick: (id) => (review && onToggleTarget ? onToggleTarget(id) : onSelect && onSelect(id)),
@@ -323,9 +406,11 @@ export function PlanBoard({ model, config, mode, targets = [], selectedId = null
   // 線の描き直しは、モデル・強調対象・職種設定が変わったときだけ
   const redrawRef = useRef(() => {});
   redrawRef.current = () => drawEdges(boardRef.current, svgRef.current, model, sets);
+  // 折りたたみで描画される行が変わるので、開いているフェーズの組み合わせも依存に入れる
+  const openSig = mode === "run" ? model.phases.filter(isOpen).map((p) => p.id).join(",") : "";
   useLayoutEffect(() => {
     redrawRef.current();
-  }, [model, sets, config]);
+  }, [model, sets, config, openSig]);
 
   // リサイズの監視は 1 回だけ登録する（ボードが現れたとき）
   const hasBoard = model.phases.length > 0;
@@ -355,6 +440,13 @@ export function PlanBoard({ model, config, mode, targets = [], selectedId = null
   return h("div", { className: `board bd-p${sets.up.size > 0 ? " focus" : ""}`, ref: boardRef },
     h("svg", { ref: svgRef }),
     bands);
+}
+
+/** 「すべて展開 / すべて畳む」。onRequest("all" | "none") */
+export function CollapseControls({ onRequest }) {
+  return h("span", { className: "bd-ctl" },
+    h("button", { type: "button", className: "wbtn sm", onClick: () => onRequest("all") }, "すべて展開"),
+    h("button", { type: "button", className: "wbtn sm", onClick: () => onRequest("none") }, "すべて畳む"));
 }
 
 export function BoardFoot() {

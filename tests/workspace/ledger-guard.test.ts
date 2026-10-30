@@ -737,3 +737,152 @@ describe("追加フェーズの出口ゲートと並び（INVALID_PHASES）", ()
 // 使われない import の警告を避けるためのダミー参照
 void work;
 void gate;
+
+describe("初回の再登録の吸収（absorbRephrase）", () => {
+  const added = (phaseId: string, id: string): ScheduledStep => ({
+    stepId: id,
+    role: "impl-code",
+    description: `${id} の作業`,
+    status: "pending",
+    phaseId,
+    kind: "work",
+    doneCriteria: ["できた"],
+  });
+
+  /** Orchestrator が計画を言い換えて送ってきた scheduledSteps */
+  const rephrased = () =>
+    edit((s) => {
+      for (const st of s) {
+        st.description = `言い換え: ${st.description}`;
+        if (st.kind !== "gate") {
+          st.doneCriteria = ["別の文言の完了定義"];
+          st.dependsOn = [];
+          st.role = "impl-code";
+        }
+      }
+      byId(s, "gate-P1").role = "text-review";
+    });
+
+  it("オプション無しなら従来どおり言い換えが replanned.changed になる", () => {
+    const r = ng(baseInput({ incoming: { scheduledSteps: rephrased() } }));
+    // gate-P1 の role 変更は irregular が要る（従来の規則）
+    expect(r.code).toBe("GATE_CHANGE_NOT_ALLOWED");
+
+    const steps = edit((s) => {
+      for (const st of s) st.description = `言い換え: ${st.description}`;
+    });
+    const r2 = ok(baseInput({ incoming: { scheduledSteps: steps } }));
+    expect(r2.replanned.changed.length).toBe(steps.length);
+  });
+
+  it("追加・削除・phases の構造の変更が無ければ、既存 Step を current の値に戻して replanned を空にし、absorbed を返す", () => {
+    const current = toScheduledSteps(plan);
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: rephrased() } }));
+    expect(r.replanned).toEqual({ added: [], changed: [], removed: [] });
+    expect(r.gateChanges).toEqual([]);
+    expect(r.scheduledSteps).toEqual(current);
+    expect(r.absorbed).toBe(true);
+  });
+
+  it("言い換えが無い（current と同じ）更新は absorbed: false。オプション無しでも false", () => {
+    const same1 = ok(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: toScheduledSteps(plan) } }));
+    expect(same1.absorbed).toBe(false);
+    const noOpt = ok(baseInput({ incoming: { scheduledSteps: toScheduledSteps(plan) } }));
+    expect(noOpt.absorbed).toBe(false);
+  });
+
+  it("status は incoming の値を使う（言い換えは捨てるが進捗は反映する）", () => {
+    const steps = rephrased();
+    byId(steps, "s1").status = "in_progress";
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: steps } }));
+    expect(byId(r.scheduledSteps, "s1").status).toBe("in_progress");
+    expect(byId(r.scheduledSteps, "s1").description).toBe(byId(toScheduledSteps(plan), "s1").description);
+    expect(r.replanned.changed).toEqual([]);
+  });
+
+  it("phases の name / goal / notes の言い換えも吸収し、結果の phases は計画のまま", () => {
+    const phases: Phase[] = structuredClone(plan.phases).map((p) => ({
+      ...p,
+      name: `言い換え: ${p.name}`,
+      goal: `言い換え: ${p.goal}`,
+      notes: [...p.notes, "余計な注記"],
+    }));
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { phases, scheduledSteps: rephrased() } }));
+    expect(r.phases).toEqual(plan.phases);
+    expect(r.replanned).toEqual({ added: [], changed: [], removed: [] });
+    expect(r.absorbed).toBe(true);
+  });
+
+  it("phases の name / goal だけの言い換え（Step は同じ）でも吸収する（absorbed: true）", () => {
+    const phases: Phase[] = structuredClone(plan.phases).map((p) => ({ ...p, name: "別名", goal: "別の目的" }));
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { phases, scheduledSteps: toScheduledSteps(plan) } }));
+    expect(r.phases).toEqual(plan.phases);
+    expect(r.absorbed).toBe(true);
+  });
+
+  it("phases の構造（順序）が変わる更新は吸収しない（言い換えは replanned.changed のまま）", () => {
+    const phases: Phase[] = structuredClone(plan.phases);
+    [phases[1], phases[2]] = [phases[2], phases[1]];
+    const steps = edit((s) => {
+      byId(s, "s2").description = "言い換え";
+    });
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { phases, scheduledSteps: steps } }));
+    // 吸収されないので s2 の言い換えが changed に残る（フェーズの並びが変わった分の依存の変化も含む）
+    expect(r.replanned.changed.map((x) => x.stepId)).toContain("s2");
+    expect(byId(r.scheduledSteps, "s2").description).toBe("言い換え");
+    expect(r.absorbed).toBe(false);
+  });
+
+  it("Step の追加が 1 つでもあれば吸収しない（従来どおり changed / added）", () => {
+    const steps = edit((s) => {
+      byId(s, "s2").description = "言い換え";
+      s.push(added("P3", "s5"));
+    });
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: steps } }));
+    expect(r.replanned.added.map((s) => s.stepId)).toEqual(["s5"]);
+    expect(r.replanned.changed.map((s) => s.stepId)).toEqual(["s2"]);
+    expect(byId(r.scheduledSteps, "s2").description).toBe("言い換え");
+  });
+
+  it("Step の削除が 1 つでもあれば吸収しない", () => {
+    const steps = edit((s) => {
+      byId(s, "s2").description = "言い換え";
+      s.splice(
+        s.findIndex((x) => x.stepId === "s4"),
+        1,
+      );
+    });
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: steps } }));
+    expect(r.replanned.removed).toEqual(["s4"]);
+    expect(r.replanned.changed.map((s) => s.stepId)).toEqual(["s2"]);
+  });
+
+  it("phases が変わる更新（フェーズの追加）は吸収しない", () => {
+    const phases: Phase[] = structuredClone(plan.phases);
+    phases.splice(3, 0, { id: "P3b", name: "追加", goal: "追加", planning: "fixed", notes: [] });
+    const steps = edit((s) => {
+      byId(s, "s2").description = "言い換え";
+      s.push(
+        { stepId: "gate-P3b", role: "code-review", description: "追加ゲート", status: "pending", phaseId: "P3b", kind: "gate", checks: [{ text: "x", method: "agent-review" }] },
+      );
+    });
+    const r = ok(baseInput({ absorbRephrase: true, incoming: { phases, scheduledSteps: steps } }));
+    expect(r.replanned.changed.map((s) => s.stepId)).toEqual(["s2"]);
+  });
+
+  it("ゲートの保護は吸収でも変わらない（checks の変更は irregular が要る）", () => {
+    const steps = edit((s) => {
+      byId(s, "gate-P3").checks = [{ text: "ビルドのみ", method: "command", command: "npm run build" }];
+    });
+    expect(ng(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: steps } })).code).toBe("GATE_CHANGE_NOT_ALLOWED");
+    const r = ok(baseInput({ absorbRephrase: true, irregular: true, reason: "重いので", incoming: { scheduledSteps: steps } }));
+    expect(r.gateChanges.map((c) => c.gateId)).toEqual(["gate-P3"]);
+  });
+
+  it("ゲートの status を completed にする更新は吸収でも GATE_PROTECTED", () => {
+    const steps = edit((s) => {
+      byId(s, "gate-P3").status = "completed";
+    });
+    expect(ng(baseInput({ absorbRephrase: true, incoming: { scheduledSteps: steps } })).code).toBe("GATE_PROTECTED");
+  });
+});

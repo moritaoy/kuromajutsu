@@ -746,7 +746,7 @@ export class WorkspaceRunner {
   applyLedgerUpdate(
     groupId: string,
     args: LedgerUpdateInput,
-  ): { phases: Phase[]; scheduledSteps: ScheduledStep[] } {
+  ): { phases: Phase[]; scheduledSteps: ScheduledStep[]; absorbed: boolean } {
     const ws = this.locate(groupId);
     if (ws.status !== "running" && ws.status !== "waiting_human") {
       throw new WorkspaceError("WORKSPACE_NOT_RUNNING", `Workspace ${ws.id} は実行中ではありません`);
@@ -754,6 +754,16 @@ export class WorkspaceRunner {
     const plan = this.approvedPlan(ws);
     const ledger = this.manager.getLedger(groupId)?.taskLedger;
     const currentSteps = ledger?.scheduledSteps ?? [];
+
+    // 初回の再登録の吸収（§13.5.5）: まだ何も進んでいない（Progress Ledger 未記録・全 Step が pending・
+    // ゲートの attempt 無し）うえ irregular でもない更新は、Orchestrator が承認済みの計画を言い換えて
+    // 送っただけのことが多い。type（task / progress）では絞らない（最初の更新は progress で届く）。
+    // 追加・削除された Step や phases の構造の変更が無いことは guardLedgerUpdate 側で判定する
+    const magentic = this.manager.getLedger(groupId);
+    const noProgressYet = !magentic?.progressLedger && (magentic?.progressHistory ?? []).length === 0;
+    const nothingStarted =
+      currentSteps.every((s) => s.status === "pending") && ws.gateResults.every((g) => g.attempts.length === 0);
+    const absorbRephrase = noProgressYet && nothingStarted && args.irregular !== true;
 
     const result = guardLedgerUpdate({
       current: { phases: ledger?.phases ?? plan.phases, scheduledSteps: currentSteps },
@@ -763,6 +773,7 @@ export class WorkspaceRunner {
       irregular: args.irregular,
       reason: args.reason,
       commandPolicy: buildCommandPolicy(getWorkspaceConfig(this.config)),
+      ...(absorbRephrase ? { absorbRephrase } : {}),
     });
     if (!result.ok) throw new WorkspaceError(result.code, result.message);
 
@@ -817,7 +828,7 @@ export class WorkspaceRunner {
       this.emit("workspace:replanned", { workspaceId: ws.id, added: r.added, changed: r.changed, removed: r.removed });
     }
 
-    return { phases: result.phases, scheduledSteps };
+    return { phases: result.phases, scheduledSteps, absorbed: result.absorbed };
   }
 
   // ----------------------------------------------------
@@ -1189,6 +1200,7 @@ export class WorkspaceRunner {
       availableRoles: this.helpers.availableRoles().map((r) => r.id),
       maxIterations: plan.maxIterations,
       currentIteration: 0,
+      ledgerPreloaded: true,
       promptAppendix: buildWorkspaceInjectionBlock({
         workspace: ws,
         plan,
