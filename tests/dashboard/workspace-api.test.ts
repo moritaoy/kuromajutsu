@@ -750,6 +750,82 @@ describe("Workspace API（実行系）", () => {
     });
   });
 
+  describe("POST /api/workspaces/:id/resume（Orchestrator 異常終了からの再開）", () => {
+    function crashed() {
+      const r = h.running();
+      h.finish(r.orchestratorId, "failure", "失敗");
+      expect(h.store.get(r.id)?.statusReason?.code).toBe("orchestrator_failed");
+      return r;
+    }
+
+    it("指示付きで 200 と running。recoveries に記録される", async () => {
+      const { id } = crashed();
+      const r = await http("POST", `/api/workspaces/${id}/resume`, { instruction: "テストから先にやり直して" });
+      expect(r.status).toBe(200);
+      expect(r.json.status).toBe("running");
+      expect(r.json.recoveries[0]).toMatchObject({
+        failure: { code: "orchestrator_failed" },
+        instruction: "テストから先にやり直して",
+      });
+    });
+
+    it("body 省略（空 body・Content-Type なし）でも 200", async () => {
+      const { id } = crashed();
+      const r = await http("POST", `/api/workspaces/${id}/resume`);
+      expect(r.status).toBe(200);
+      expect(r.json.status).toBe("running");
+    });
+
+    it("body があるのに Content-Type が application/json でなければ 415（再開されない）", async () => {
+      const { id } = crashed();
+      const r = await http("POST", `/api/workspaces/${id}/resume`, undefined, '{"instruction":"x"}', {
+        "Content-Type": "text/plain",
+      });
+      expect(r.status).toBe(415);
+      expect(h.store.get(id)?.status).toBe("failed");
+    });
+
+    it("instruction が文字列でなければ 400、再開できない状態は 409、不明は 404、foreign Origin は 403", async () => {
+      const { id } = crashed();
+      expect((await http("POST", `/api/workspaces/${id}/resume`, { instruction: 1 })).status).toBe(400);
+      const running = h.running();
+      expect((await http("POST", `/api/workspaces/${running.id}/resume`, {})).status).toBe(409);
+      expect((await http("POST", "/api/workspaces/ws-nope/resume", {})).status).toBe(404);
+      expect(
+        (await http("POST", `/api/workspaces/${id}/resume`, {}, undefined, { Origin: "http://evil.example" })).status,
+      ).toBe(403);
+      expect(h.store.get(id)?.status).toBe("failed");
+    });
+
+    it("server_restart の failed や、グループが無い Workspace は 409", async () => {
+      const a = h.running();
+      h.store.update(a.id, (w) => {
+        w.status = "failed";
+        w.statusReason = { code: "server_restart", message: "サーバー再起動" };
+      });
+      const ra = await http("POST", `/api/workspaces/${a.id}/resume`, {});
+      expect(ra.status).toBe(409);
+      expect(ra.json.error).toBe("INVALID_STATE");
+
+      const b = crashed();
+      h.manager.deleteGroup(b.groupId);
+      expect((await http("POST", `/api/workspaces/${b.id}/resume`, {})).status).toBe(409);
+    });
+
+    it("GET の単体に resumable（再開できるときだけ true）が付く", async () => {
+      const { id } = crashed();
+      const ok = await http("GET", `/api/workspaces/${id}`);
+      expect(ok.json.resumable).toBe(true);
+
+      const running = h.running();
+      expect((await http("GET", `/api/workspaces/${running.id}`)).json.resumable).toBe(false);
+
+      const lost = crashed();
+      h.manager.deleteGroup(lost.groupId);
+      expect((await http("GET", `/api/workspaces/${lost.id}`)).json.resumable).toBe(false);
+    });
+  });
+
   describe("POST /api/workspaces/:id/irregulars/:gateChangeId/ack", () => {
     it("acknowledgedAt を付けて 200。不明な ID は 404", async () => {
       const { id, groupId } = h.running();

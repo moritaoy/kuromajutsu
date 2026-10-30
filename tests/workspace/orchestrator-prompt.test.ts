@@ -473,6 +473,175 @@ describe("buildResumePrompt", () => {
     expect(text).not.toMatch(/人からの指示[^]*OLD-INSTRUCTION[^]*次にやること/);
   });
 
+  it("異常終了からの再開: 見出し・異常終了の理由・人の指示・続きから再開する指示", () => {
+    const text = buildResumePrompt({
+      ...base,
+      reason: { kind: "recover", failure: "FAILURE-REASON ネットワーク切断", instruction: "テストから先にやり直して" },
+    });
+    expect(text).toContain("Orchestrator の異常終了からの再開");
+    expect(text).toContain("FAILURE-REASON ネットワーク切断");
+    expect(text).toContain("人の指示: テストから先にやり直して");
+    expect(text).toMatch(/人からの指示[^]*テストから先にやり直して[^]*次にやること/);
+    // 停止済みのサブ Agent・部分的な成果・完了していない最初の手順から続ける・自分では作業しない・ゲートの再チェック
+    expect(text).toContain("停止済み");
+    expect(text).toContain("部分的");
+    expect(text).toContain("完了していない最初の手順");
+    expect(text).toContain("自分では作業しない");
+    expect(text).toContain("サーバーの記録を正");
+    // gateId の無い kind でも壊れない（undefined が文面に出ない）
+    expect(text).not.toContain("undefined");
+  });
+
+  it("異常終了からの再開: 指示が無ければ「人の指示」の行は出さない", () => {
+    const text = buildResumePrompt({
+      ...base,
+      reason: { kind: "recover", failure: "boom" },
+    });
+    expect(text).not.toContain("人の指示:");
+    expect(text).toMatch(/人からの指示[^]*なし/);
+  });
+
+  describe("異常終了からの再開（ゲートの状態別・停止したサブ Agent・未対応の再開理由）", () => {
+    const attempt = (n: number, passed: boolean, closed = true) => ({
+      attempt: n,
+      checks: [{ checkIndex: 0, method: "command" as const, passed, at: "2026-10-29T00:04:00.000Z" }],
+      ...(closed ? { closedAt: "2026-10-29T00:04:00.000Z" } : {}),
+    });
+    const gateResult = (
+      gateId: string,
+      status: "pending" | "failed" | "auto_passed" | "waiting_human" | "passed",
+      attempts: ReturnType<typeof attempt>[] = [],
+      retryInstructions: { text: string; at: string; afterAttempt?: number }[] = [],
+    ) => ({ gateId, phaseId: gateId.replace("gate-", ""), status, attempts, retryInstructions });
+    const recover = (ws: Workspace, extra: Partial<ResumePromptInput> = {}) =>
+      buildResumePrompt({
+        ...base,
+        workspace: ws,
+        reason: { kind: "recover", failure: "boom" },
+        ...extra,
+      });
+
+    it("ゲートを状態別に列挙する（failed は修正を続けてから再チェック / auto_passed は自動チェックをやり直さない / 途中の attempt は再チェック）", () => {
+      const ws = makeWorkspace({
+        gateResults: [
+          gateResult("gate-P1", "auto_passed", [attempt(1, true)]),
+          gateResult("gate-P2", "failed", [attempt(1, false)]),
+          gateResult("gate-P3", "pending", [attempt(1, true, false)]),
+          gateResult("gate-final", "pending"),
+        ],
+      });
+      const text = recover(ws);
+      expect(text).toContain("不合格（failed）: gate-P2");
+      expect(text).toContain("自動チェック合格・人間レビュー前（auto_passed）: gate-P1");
+      expect(text).toContain("途中の attempt（pending）: gate-P3");
+      // まだ着手していないゲートは列挙しない
+      expect(text).not.toMatch(/（(failed|auto_passed|pending)）: [^\n]*gate-final/);
+      // 状態別の指示
+      expect(text).toMatch(/failed[^]*修正の手順[^]*終わってから[^]*再チェック/);
+      expect(text).toMatch(/auto_passed[^]*自動チェックはやり直さない[^]*request_human_review/);
+      expect(text).toMatch(/pending[^]*同じ条件で再チェック/);
+    });
+
+    it("該当するゲートが無ければ、その状態の行は出さない", () => {
+      const text = recover(makeWorkspace({ gateResults: [gateResult("gate-P1", "passed", [attempt(1, true)])] }));
+      expect(text).not.toContain("不合格（failed）:");
+      expect(text).not.toContain("（auto_passed）:");
+      expect(text).not.toContain("途中の attempt（pending）:");
+    });
+
+    it("手順の追加は update_ledger(type: task) で行い、ゲートは変えない", () => {
+      const text = recover(makeWorkspace());
+      expect(text).toContain('update_ledger(type: "task", phases, scheduledSteps)');
+      expect(text).toContain("ゲートは変えない");
+    });
+
+    it("途中で停止したサブ Agent（agentId・role・途中までのファイル）を別ブロックで渡す", () => {
+      const text = recover(makeWorkspace(), {
+        stoppedAgents: [
+          { agentId: "impl-code-9-zzzz", role: "impl-code", status: "failed", editedFiles: ["src/partial.ts"], createdFiles: ["src/new-one.ts"] },
+        ],
+      });
+      expect(text).toContain("途中で停止したサブ Agent");
+      expect(text).toContain("impl-code-9-zzzz");
+      expect(text).toContain("impl-code");
+      expect(text).toContain("src/partial.ts");
+      expect(text).toContain("src/new-one.ts");
+    });
+
+    it("停止したサブ Agent が無ければ「なし」。他の理由の再開ではこのブロックを出さない", () => {
+      expect(recover(makeWorkspace())).toMatch(/途中で停止したサブ Agent[^]*（なし）/);
+      const text = buildResumePrompt({
+        ...base,
+        reason: { kind: "approved", gateId: "gate-P1" },
+        stoppedAgents: [{ agentId: "x-1", role: "x", status: "failed", editedFiles: [], createdFiles: [] }],
+      });
+      expect(text).not.toContain("途中で停止したサブ Agent");
+    });
+
+    const changesRequested = (version: number, status: "changes_requested" | "pending" | "approved") => ({
+      gateId: "gate-P1",
+      version,
+      status,
+      docFile: `reviews/gate-P1-v${version}.html`,
+      comments: status === "changes_requested" ? [{ sectionId: "alt", text: `COMMENT-V${version}` }] : [],
+      requestedAt: "2026-10-29T00:07:00.000Z",
+    });
+
+    it("未対応の人間レビューの差し戻し（それより新しい版が無い）は、コメントと次の版・previousFeedback を明示する", () => {
+      const ws = makeWorkspace({
+        gateResults: [gateResult("gate-P1", "pending", [attempt(1, true)])],
+        humanReviews: [changesRequested(1, "changes_requested"), changesRequested(2, "changes_requested")],
+      });
+      const text = recover(ws);
+      expect(text).toContain("未対応の人間レビューの差し戻し");
+      // （状態のスナップショットの JSON には両方の版が入るため、「次にやること」の側だけを見る）
+      expect(text).toMatch(/未対応の人間レビューの差し戻し[^]*COMMENT-V2/);
+      expect(text).not.toMatch(/未対応の人間レビューの差し戻し[^]*COMMENT-V1/);
+      expect(text).toContain("version: 3");
+      expect(text).toContain("previousFeedback");
+      expect(text).toContain("レビュー指摘の反映");
+      // 同じゲートを「途中の attempt」としても列挙しない
+      expect(text).not.toContain("途中の attempt（pending）: gate-P1");
+    });
+
+    it("差し戻しより新しい版（保留中・承認済み）があれば、未対応としない", () => {
+      for (const next of ["pending", "approved"] as const) {
+        const ws = makeWorkspace({
+          humanReviews: [changesRequested(1, "changes_requested"), changesRequested(2, next)],
+        });
+        expect(recover(ws)).not.toContain("未対応の人間レビューの差し戻し");
+      }
+    });
+
+    it("最新の retryInstructions の後に attempt が無ければ、その指示を明示する", () => {
+      const ws = makeWorkspace({
+        gateResults: [
+          gateResult("gate-P2", "pending", [attempt(1, false), attempt(2, false), attempt(3, false)], [
+            { text: "OLD-RETRY", at: "2026-10-29T00:02:00.000Z", afterAttempt: 1 },
+            { text: "LATEST-RETRY-TEXT", at: "2026-10-29T00:05:00.000Z", afterAttempt: 3 },
+          ]),
+        ],
+      });
+      const text = recover(ws);
+      expect(text).toContain("未対応の再試行の指示");
+      expect(text).toMatch(/未対応の再試行の指示[^]*LATEST-RETRY-TEXT/);
+      expect(text).not.toMatch(/未対応の再試行の指示[^]*OLD-RETRY/);
+      expect(text).toContain("原因の切り分け");
+    });
+
+    it("再試行の指示より後に attempt があれば、未対応としない", () => {
+      const ws = makeWorkspace({
+        gateResults: [
+          gateResult("gate-P2", "failed", [attempt(1, false), attempt(2, false)], [
+            { text: "RETRY-DONE", at: "2026-10-29T00:02:00.000Z", afterAttempt: 1 },
+          ]),
+        ],
+      });
+      const text = recover(ws);
+      expect(text).not.toContain("未対応の再試行の指示");
+    });
+  });
+
   it("承認 / 差し戻しでは人からの指示は「なし」", () => {
     const text = buildResumePrompt({ ...base, reason: { kind: "approved", gateId: "gate-P1" } });
     expect(text).toMatch(/人からの指示[^]*なし/);

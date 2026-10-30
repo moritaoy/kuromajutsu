@@ -354,7 +354,7 @@ export async function handleWorkspaceApi(
       }
       const ws = service.get(id);
       if (!ws) throw new HttpError(404, "NOT_FOUND", `Workspace が見つかりません: ${id}`);
-      sendJson(res, 200, { ...ws, validation: service.getValidation(id) });
+      sendJson(res, 200, { ...ws, validation: service.getValidation(id), resumable: service.canRecover(id) });
       return true;
     }
 
@@ -392,6 +392,12 @@ export async function handleWorkspaceApi(
       const body = await readOptionalJsonBody(req);
       const instruction = optionalString(body, "instruction");
       sendJson(res, 200, service.retry(id, { instruction }));
+      return true;
+    }
+    if (segments.length === 2 && segments[1] === "resume" && method === "POST") {
+      const body = await readOptionalJsonBody(req);
+      const instruction = optionalString(body, "instruction");
+      sendJson(res, 200, service.recover(id, { instruction }));
       return true;
     }
     if (segments.length === 4 && segments[1] === "irregulars" && segments[3] === "ack" && method === "POST") {

@@ -12,6 +12,7 @@ import { ReviewView } from "./ReviewView.js";
 import { RunView, ReadonlyBoard } from "./RunView.js";
 import { ReportView } from "./ReportView.js";
 import { IrregularBanner } from "./IrregularBanner.js";
+import { RecoverPanel } from "./RecoverPanel.js";
 import { STATUS_LABEL, fmtDateTime, truncate } from "./plan-utils.js";
 
 const BASE = "#/workspace";
@@ -129,6 +130,9 @@ function EndedView({ workspace, meta, config, state, api, dispatch }) {
       h("div", { className: "ended-i" }, h("span", { className: "caret" }, ">"), workspace.instruction),
       reason && h("div", { className: "hint" }, `code: ${reason.code}${reason.gateId ? ` · gate: ${reason.gateId}` : ""}`),
       h("div", { style: { marginTop: 10 } }, h("button", { className: "wbtn sm", onClick: () => openWorkspace(null) }, "新しい指示を書く"))),
+    // Orchestrator の異常終了は、サーバーが動いている間なら続きから再開できる（spec §13.8.9）
+    workspace.status === "failed" && reason && reason.code === "orchestrator_failed" &&
+      h(RecoverPanel, { workspace, api, dispatch }),
     // 終了後も、未確認のイレギュラーは確認できるようにする（確認済みは折りたたみで残る）
     h(IrregularBanner, { workspace, api, dispatch }),
     workspace.revisions.length > 0 && h(ReadonlyBoard, { workspace, meta, config, state }));

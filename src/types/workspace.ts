@@ -32,6 +32,16 @@ export interface StatusReason {
   message: string;
 }
 
+/** Orchestrator の異常終了からの再開の履歴（§13.8.9） */
+export interface WorkspaceRecovery {
+  /** 再開した時刻（ISO 8601） */
+  at: string;
+  /** 再開前の失敗（`failed` / `orchestrator_failed` の理由文） */
+  failure: { code: "orchestrator_failed"; message: string };
+  /** 人が付けた指示 */
+  instruction?: string;
+}
+
 export interface Workspace {
   /** ws-{unixTimestamp}-{random4hex} */
   id: string;
@@ -50,6 +60,8 @@ export interface Workspace {
   gateResults: GateResult[];
   humanReviews: HumanReview[];
   gateChanges: GateChange[];
+  /** Orchestrator の異常終了からの再開の履歴（再開したことがなければ無い。古い保存ファイルとの互換のため optional） */
+  recoveries?: WorkspaceRecovery[];
   report?: WorkspaceReport;
   /** ISO 8601 */
   createdAt: string;

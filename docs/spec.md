@@ -1368,7 +1368,7 @@ interface HealthCheckResult {
 **画面の流れ（4 つ）:**
 - ① 指示: 指示欄のみ（任意で作業ディレクトリ）
 - ② 計画レビュー: フェーズ帯のボード、解釈（`PlanSpec`）と検証結果（V1〜V9）。追加指示で再計画し、エラー 0 件で承認できる
-- ③ 実行: 同じボードに状態を重ねる。直前計画・リプラン・イレギュラー（ゲート変更）を目立たせる。人間レビュー待ちではレビューパネル、差し戻し上限超過では「ゲート不合格が続いています」パネルを上部に出す
+- ③ 実行: 同じボードに状態を重ねる。直前計画・リプラン・イレギュラー（ゲート変更）を目立たせる。人間レビュー待ちではレビューパネル、差し戻し上限超過では「ゲート不合格が続いています」パネルを上部に出す。Orchestrator が異常終了した `failed` では、再開できるときに「再開」パネルを出す
 - ④ 完了レポート: 結果のサマリを最上部に置き、経過は折りたたむ
 
 **UI表現:**
@@ -1406,7 +1406,7 @@ interface HealthCheckResult {
 | `workspace:gate_retry_exceeded` | 差し戻し上限超過で人の判断待ちになった | `maxRetries` を超えて不合格が続いた時 |
 | `workspace:human_review_requested` | 人間レビュー待ちになった | `request_human_review` 時 |
 | `workspace:human_review_resolved` | 人間レビューが解消した（承認 / 差し戻し） | `POST /api/workspaces/:id/gates/:gateId/review` 時 |
-| `workspace:resumed` | 新しい Orchestrator で再開した | 再開プロンプトで Orchestrator を起動した時 |
+| `workspace:resumed` | 新しい Orchestrator で再開した（`reason`: `approved` / `changes_requested` / `retry` / `recover`） | 再開プロンプトで Orchestrator を起動した時（`recover` は異常終了からの再開。§13.8.9） |
 | `workspace:irregular` | ゲート変更（変更前後・理由）。UI は必ず警告表示する | `update_ledger` がゲート変更を受理した時 |
 
 Workspace 実行中は、既存の `group:magentic_iteration` / `group:ledger_updated` / `agent:*` イベントの `data` に `workspaceId` を付与して再利用する。`workspace:*` の詳細は §13.9.2 を参照。
@@ -1703,7 +1703,8 @@ claude mcp add --transport http kuromajutsu http://localhost:9696/mcp
 - 人は計画を直接編集せず、AI への追加指示で練り直す
 - ゲートの `command` はサーバーが実行する（禁止パターンは既定で有効）
 - 人間レビュー待ちの間は Orchestrator プロセスは存在せず、判断後に新しい Orchestrator が再開する
-- サーバーを再起動すると、実行中・人間レビュー待ちの Workspace は `failed`（サーバー再起動）になる
+- Orchestrator が異常終了（ネット切れなど）して `failed` になっても、サーバーが動き続けていれば「再開」で新しい Orchestrator が続きから実行する（動いていたサブ Agent は停止し、成果の確認から再開する）
+- サーバーを再起動すると、実行中・人間レビュー待ちの Workspace は `failed`（サーバー再起動）になり、再開できない（`orchestrator_failed` の Workspace も、メモリのグループが失われるため再開できなくなる）
 
 ---
 
@@ -1717,7 +1718,7 @@ claude mcp add --transport http kuromajutsu http://localhost:9696/mcp
 - **実行コスト追跡:** API 使用量やトークン数を記録し、コスト分析を可能にする
 - **通知機能:** Agent の完了や失敗をシステム通知やチャットで知らせる
 - **Workspace の一時停止と途中指示:** 実行中の Workspace を一時停止し、Orchestrator に自由な指示を渡して再開する。§13.8.4 の再開プロンプトの仕組み（Orchestrator を終了し、状態のスナップショットと人の指示を渡して新しい Orchestrator を起動する）で実現できる。今回の範囲では、人間レビューの差し戻しコメントと差し戻し上限超過後の再試行の指示のみを扱う
-- **Workspace の再起動後の再開:** Magentic グループと Task Ledger を永続化し、サーバー再起動後に `failed` にせず再開プロンプトで再開する
+- **Workspace の再起動後の再開:** Magentic グループと Task Ledger を永続化し、サーバー再起動後に `failed` にせず再開プロンプトで再開する（Orchestrator 異常終了からの再開（§13.8.9）はサーバーが動き続けている間のみ対応している）
 
 ---
 
@@ -1759,6 +1760,8 @@ flowchart LR
   D -- 差し戻し上限超過<br/>Orchestrator は終了 --> J{人の判断}
   J -- 指示を付けて再試行 --> R
   J -- 中断 --> X[aborted]
+  D -- Orchestrator 異常終了<br/>failed --> K{人の判断}
+  K -- 再開（サーバー稼働中） --> R
   D -- 最終ゲート合格 --> E[5. 完了レポート]
 ```
 
@@ -1767,7 +1770,7 @@ flowchart LR
 | 指示 | — | 指示を書く（任意で作業ディレクトリ） |
 | 計画生成 | **Planner**（`planner` 職種、§13.7） | 待つ |
 | 計画レビュー | Planner（再計画）/ 検証器（V1〜V9） | 計画を読み、AI に追加指示、承認 |
-| 実行 | Magentic Orchestrator + サブ Agent | 監視、人間レビュー、差し戻し上限超過の判断、イレギュラー通知の確認、中断 |
+| 実行 | Magentic Orchestrator + サブ Agent | 監視、人間レビュー、差し戻し上限超過の判断、Orchestrator 異常終了からの再開、イレギュラー通知の確認、中断 |
 | 完了 | — | レポート（実装内容・作業フロー・ゲート結果・人間レビュー）の確認 |
 
 #### 13.2.1 状態遷移
@@ -1788,6 +1791,7 @@ stateDiagram-v2
   running --> done: 最終ゲート合格
   running --> failed: maxIterations 超過 / Orchestrator 異常終了 / サーバー再起動
   waiting_human --> failed: サーバー再起動
+  failed --> running: 再開（orchestrator_failed かつサーバー稼働中）
   running --> aborted: 中断
 ```
 
@@ -1798,12 +1802,12 @@ stateDiagram-v2
 | `running` | Orchestrator が承認済みの計画を実行中 | 監視、中断 |
 | `waiting_human` | 人の判断待ち。Orchestrator プロセスは終了しており、人の操作で **新しい Orchestrator が再開する**（§13.8.4）。理由は 2 つ（下表） | レビュー、または再試行 / 中断 |
 | `done` | 最終ゲートに合格して完了 | レポートの確認 |
-| `failed` | 失敗して終了（理由は `statusReason`: 計画生成失敗 / `maxIterations` 超過 / Orchestrator 異常終了 / サーバー再起動） | 内容を確認し、必要なら新しい Workspace を作る |
+| `failed` | 失敗して終了（理由は `statusReason`: 計画生成失敗 / `maxIterations` 超過 / Orchestrator 異常終了 / サーバー再起動） | 内容を確認し、必要なら新しい Workspace を作る。**Orchestrator 異常終了（`orchestrator_failed`）で、サーバーが動き続けている間だけ「再開」できる**（§13.8.9） |
 | `aborted` | 人が中断した | — |
 
 中断（`POST /api/workspaces/:id/abort`）は `planning` / `review` / `running` / `waiting_human` から行える（それ以外は 409）。`planning` 中の中断は、Planner Agent を kill し、計画生成用のグループ（`Workspace <id> 計画生成`）を削除してから `aborted`（`user_abort`）にする。`review` からは Agent を持たないため、状態を `aborted` にするだけである。`running` / `waiting_human` からの中断は §13.8.8 を参照。
 
-`done` / `failed` / `aborted` は終端状態であり、以降は遷移しない。
+`done` / `failed` / `aborted` は終端状態であり、以降は遷移しない。**ただし例外として、`failed` のうち `orchestrator_failed`（Orchestrator の異常終了）だけは、サーバーが動き続けていて Magentic グループが残っている間に限り、人の操作（`POST /api/workspaces/:id/resume`）で `running` に戻せる**（§13.8.9）。`plan_failed` / `max_iterations` / `server_restart` は再開できない。
 
 `waiting_human` は次の 2 つの理由（`statusReason.code`）を持つ。
 
@@ -1840,6 +1844,12 @@ interface StatusReason {
   message: string;      // 人が読む理由文（例: 「サーバー再起動」）
 }
 
+interface WorkspaceRecovery {
+  at: string;                    // 再開した時刻（ISO 8601）
+  failure: { code: "orchestrator_failed"; message: string }; // 再開前の失敗の理由
+  instruction?: string;          // 人が付けた指示
+}
+
 interface Workspace {
   id: string;                    // ws-{unixTimestamp}-{random4hex}
   instruction: string;           // 最初の指示（1 欄）
@@ -1852,6 +1862,7 @@ interface Workspace {
   gateResults: GateResult[];     // ゲートごとの自動チェック結果
   humanReviews: HumanReview[];   // 人間レビューの履歴（資料の版・判断・コメント）
   gateChanges: GateChange[];     // イレギュラー（ゲート変更）の履歴
+  recoveries?: WorkspaceRecovery[]; // Orchestrator の異常終了からの再開の履歴（再開したことがなければ無い）
   report?: WorkspaceReport;      // 完了レポート（done のとき）
   createdAt: string;             // ISO 8601
   updatedAt: string;             // ISO 8601
@@ -2362,7 +2373,7 @@ sequenceDiagram
 
 | 項目 | 内容 |
 |---|---|
-| 再開の理由 | 人間レビューの承認 / 差し戻し / 差し戻し上限超過後の再試行のいずれか。対象ゲート ID |
+| 再開の理由 | 人間レビューの承認 / 差し戻し / 差し戻し上限超過後の再試行 / Orchestrator の異常終了からの再開のいずれか。対象ゲート ID（異常終了からの再開には無い） |
 | Workspace | 指示、作業ディレクトリ、承認済みの WorkPlan の `spec`（スコープ・制約・完了条件・前提） |
 | **Task Ledger の全状態** | `facts`、`plan`、`phases`（直前計画・修正フェーズを含む現在の姿）、`scheduledSteps`（各 Step の `status`） |
 | **Progress Ledger の履歴** | これまでの反復ごとの判定（`isRequestSatisfied` / `isInLoop` / `isProgressBeingMade` / `nextAction` / `instruction`） |
@@ -2370,7 +2381,7 @@ sequenceDiagram
 | **レビュー結果** | 全 `HumanReview`（版、承認 / 差し戻し、**差し戻しコメント**（節 ID 付き）） |
 | イレギュラー | これまでの `GateChange`（理由付き） |
 | 各サブ Agent の結果の要約 | 完了した Agent の `summary` と `editedFiles` / `createdFiles` |
-| 人からの指示 | 差し戻し上限超過後の再試行の指示（`retryInstructions` の最新） |
+| 人からの指示 | 差し戻し上限超過後の再試行の指示（`retryInstructions` の最新）、または Orchestrator 異常終了からの再開の指示 |
 | 次にやること | 理由ごとの具体的な指示（下表） |
 
 | 再開の理由 | 「次にやること」 |
@@ -2378,6 +2389,7 @@ sequenceDiagram
 | 承認 | 対象ゲートは合格済み。次のフェーズ（`deferred` なら直前計画から）へ進む |
 | 差し戻し | そのフェーズに「レビュー指摘の反映」手順を追加して実行する → ゲートの自動チェックをやり直す → text-writer に **次の版**（`previousFeedback` 付き）のレビュー資料を作らせる → `request_human_review` を呼んで終了する |
 | 上限超過後の再試行 | 人の指示を踏まえて原因の切り分けからやり直す。そのゲートの失敗回数は、再試行の指示より後の attempt だけを数えるため 0 から数え直しになる |
+| 異常終了からの再開 | 前の Orchestrator は異常終了した（理由を示す）。途中で動いていたサブ Agent は停止済みで（「途中で停止したサブ Agent」として渡す）、成果は部分的にディスクに残っている可能性がある。Task Ledger・Progress Ledger・サブ Agent の結果を見て **完了していない最初の手順** から続ける。途中だった手順はやり直すか、成果を確認するレビュー手順を挟む（自分では作業しない原則は変えない）。ゲートの状態は **サーバーの記録を正** とし、状態ごと（`failed` / `auto_passed` / 途中の `pending`）に指示を分ける。未対応の差し戻し・再試行があればその手順も示す。人の指示があれば「人の指示: …」として含める（§13.8.9） |
 
 #### 13.8.7 `maxIterations` の算出
 
@@ -2409,7 +2421,45 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 
 人が中断した場合（`POST /api/workspaces/:id/abort`）は、Orchestrator と Magentic グループ配下の実行中 Agent に SIGTERM を送り、`aborted`（`user_abort`）にする。
 
-#### 13.8.9 画面の表示との対応
+#### 13.8.9 Orchestrator の異常終了からの再開
+
+ネット切れなどで Orchestrator の CLI プロセスが異常終了すると、§13.8.8 の判定で Workspace は `failed`（`orchestrator_failed`）になる。サーバーが動き続けていれば、Magentic グループ・Task Ledger / Progress Ledger・サブ Agent の結果は `AgentManager` のメモリに残っているため、§13.8.4 と同じ仕組み（再開プロンプトで新しい Orchestrator を同じグループに起動）で続きから再開できる。
+
+**再開できる条件**（すべてを満たす。満たさなければ `INVALID_STATE`（HTTP 409））:
+
+1. `status` が `failed` で、`statusReason.code` が `orchestrator_failed`
+2. `workspace.groupId` の Magentic グループ（`active`）と `MagenticConfig` が `AgentManager` に残っている
+3. 通算の反復回数（Progress Ledger の履歴 + 現在、反復番号、`MagenticConfig` の値の最大）が `maxIterations` 未満（上限に達していれば、新しい Orchestrator がすぐ上限に当たるため再開しない）
+
+`max_iterations`（反復の上限に達した。やり直しても同じ結果になるため）、`plan_failed`、`server_restart`（グループが失われている。§13.12）は再開できない。サーバー再起動後は、`orchestrator_failed` の Workspace も、メモリのグループが無いため再開できない（`GET /api/workspaces/:id` の `resumable` が `false`。`resumable` は上の条件 1〜3 をすべて満たすときだけ `true`）。
+
+**手順**（`POST /api/workspaces/:id/resume`、body: `{ instruction? }`）:
+
+1. 実行中のゲートの `command`（`run_gate_check`）が残っていれば止める。Orchestrator が `run_gate_check` の待ち中に異常終了した場合も、`failed` にする時点（§13.8.8）で止める。止めた呼び出しは結果を記録しない（再開後に古い結果が attempt の二重記録・差し戻し回数の消費・`GATE_ALREADY_PASSED` を起こしたり、同じ作業ディレクトリでテストが 2 本走ったりしないため）。
+2. `recoveries` に `{ at, failure: { code: "orchestrator_failed", message }, instruction? }` を追記する（失敗の `message` は直前の `statusReason.message`）。
+3. `status` を `running` にし、`statusReason` を消す。`running` になった時点で、同じ Workspace への 2 回目の `resume` は 409 になる。
+4. グループ内でまだ動いている（`running` / `queued` の）サブ Agent を停止する（`killAgent`。Orchestrator 自身は対象外）。部分的な成果はディスクに残る前提で、新しい Orchestrator が成果を確認する。
+5. すぐ `running` の Workspace を返す。以降は非同期で、旧 Orchestrator **と停止したサブ Agent** の終了を待ち（最大 30 秒の共通の上限。超過時は旧 Orchestrator に SIGTERM。§13.8.4）、再開プロンプト（§13.8.6、理由は「異常終了からの再開」）で新しい Orchestrator を同じ Magentic グループに起動して `workspace:resumed`（`reason: "recover"`）を出す。サブ Agent の終了を待つのは、終了前に起動すると同時実行数の上限（`agent.maxConcurrent`）に当たることがあるため。待っている間に中断（`abort`）された場合は、Orchestrator を起動しない。起動に失敗したら再び `failed`（`orchestrator_failed`）になり、もう一度再開できる。
+6. Progress Ledger の反復番号は通し番号で続け、`maxIterations` も通算で数える（§13.8.4）。再開後に最終ゲートを合格させて Orchestrator が `success` で終了すれば、§13.8.8 のとおり `done` になる。
+
+再開のたびに `recoveries` に 1 件ずつ積む（Workspace の保存ファイルに残る。古い保存ファイルには無いため optional）。
+
+**再開プロンプト**（理由が「異常終了からの再開」のとき。§13.8.6 の共通の状態に加えて）:
+
+- 状態のスナップショットに「**途中で停止したサブ Agent**」を加える。結果を報告しないまま終わった Agent（`recover` で停止したもの、結果なしで終わったもの）の `agentId`・職種・状態と、途中までの `editedFiles` / `createdFiles` を渡す（結果を報告した Agent は従来どおり「完了したサブ Agent の結果の要約」に入る）。
+- 「次にやること」: ① 台帳とサブ Agent の結果を見て **完了していない最初の手順** から続ける。② 途中だった手順は、やり直させるか、成果を確認するレビュー手順を挟む。手順の追加は `update_ledger(type: "task", phases, scheduledSteps)` で行い（ゲートは変えない）、自分では作業しない。③ ゲートの状態は **サーバーの記録を正** とし、状態ごとに該当するゲート ID を列挙して指示を分ける（下表）。④ 最終ゲートが合格済みで残りの手順が無ければ、`report_result(success)` で最終報告をする。人の指示があれば「人の指示: …」として含める。
+
+  | ゲートの状態 | 指示 |
+  |---|---|
+  | `failed`（不合格のまま修正の途中） | 修正の手順（原因の切り分け / 修正フェーズ）を続け、**終わってから** 同じ条件で再チェックする。修正の前に再チェックしない |
+  | `auto_passed`（自動チェック合格・人間レビュー前） | 自動チェックはやり直さない。レビュー資料を作らせて `request_human_review` へ進み、終了する |
+  | `pending` で途中の attempt（結果が一部だけ記録されている）がある | 同じ条件で再チェックする。まだ着手していないゲートは列挙しない |
+
+- **元の再開理由の引き継ぎ**: `orchestrator_failed` は、再開時の起動失敗（例: 人間レビューの差し戻し後の再開が同時実行数の上限で起動できなかった）でも付く。そのため、状態から次の未対応の再開を復元し、該当するゲートは上の表から除いて、既存の再開理由と同じ手順（§13.8.6 の表）を明示する。
+  - **未対応の人間レビューの差し戻し**: ゲートの最新版が `changes_requested` で、それより新しい版が無い。コメント（節 ID 付き）と、「次の版（version: N）で資料を作り `previousFeedback` に対応を書く」手順を示す。
+  - **未対応の再試行の指示**: 最新の `retryInstructions` より後の attempt が無い。その指示と、原因の切り分けからやり直す手順を示す。
+
+#### 13.8.10 画面の表示との対応
 
 | 画面 | 元データ |
 |---|---|
@@ -2425,13 +2475,14 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 | メソッド・パス | 内容 |
 |---|---|
 | `GET /api/workspaces` | Workspace の一覧（`id` / `instruction` / `status` / `statusReason` / `createdAt` / `updatedAt`） |
-| `GET /api/workspaces/:id` | Workspace の全体（`revisions`・`gateResults`・`humanReviews`・`gateChanges`・`report` を含む） |
+| `GET /api/workspaces/:id` | Workspace の全体（`revisions`・`gateResults`・`humanReviews`・`gateChanges`・`recoveries`・`report` を含む）。加えて `validation`（検証結果）と `resumable`（`resume` できるか。§13.8.9）を返す |
 | `POST /api/workspaces` | 指示を送信し Workspace を作成、Planner を起動。body: `{ instruction, workspacePath? }` |
 | `POST /api/workspaces/:id/replan` | 追加指示で再計画。body: `{ instruction, targets?: { kind: "phase" \| "step" \| "gate", id: string }[] }` |
 | `POST /api/workspaces/:id/approve` | 承認 → Magentic 起動。body: `{ maxIterations? }`。検証エラーがあれば 422 |
 | `POST /api/workspaces/:id/gates/:gateId/review` | 人間レビューの結果 → 再開。body: `{ decision: "approve" \| "request_changes", comment?, comments?: { sectionId?, text }[] }` |
 | `GET /api/workspaces/:id/reviews/:file` | レビュー資料（HTML と、`file` 節の複製ファイル）の配信。`:file` は `reviews/` 配下の相対パス。`..` を含むパスは拒否する |
 | `POST /api/workspaces/:id/retry` | 差し戻し上限超過後の再試行（`gate_retry_exceeded` のときのみ）。body: `{ instruction? }` |
+| `POST /api/workspaces/:id/resume` | Orchestrator 異常終了（`failed` / `orchestrator_failed`）からの再開（§13.8.9）。body: `{ instruction? }`。再開できない状態・メモリ上のグループが無い場合は 409 |
 | `POST /api/workspaces/:id/irregulars/:gateChangeId/ack` | ゲート変更イレギュラーの確認済み |
 | `POST /api/workspaces/:id/abort` | 中断 |
 
@@ -2447,7 +2498,7 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 | 405 | `METHOD_NOT_ALLOWED` | 一覧（`/api/workspaces`）・単体（`/:id`）・レビュー資料（`/:id/reviews/*`）の 3 種のパスに対する未対応のメソッド（操作系のパスは 404） |
 | 409 | `INVALID_STATE` | 現在の状態では行えない操作 |
 | 413 | `PAYLOAD_TOO_LARGE` | リクエスト body が 1 MiB を超える |
-| 415 | `UNSUPPORTED_MEDIA_TYPE` | `Content-Type` が `application/json` でない（単純リクエストによる CSRF の対策）。`POST /api/workspaces`・`replan`・`gates/:gateId/review` は body が空でも `Content-Type: application/json` が必須。`approve` / `retry` は body が無いときだけ `Content-Type` を要求しない（body があれば必須）。`abort` と `irregulars/:id/ack` は body も `Content-Type` も読まず、Origin の検査だけを行う |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | `Content-Type` が `application/json` でない（単純リクエストによる CSRF の対策）。`POST /api/workspaces`・`replan`・`gates/:gateId/review` は body が空でも `Content-Type: application/json` が必須。`approve` / `retry` / `resume` は body が無いときだけ `Content-Type` を要求しない（body があれば必須）。`abort` と `irregulars/:id/ack` は body も `Content-Type` も読まず、Origin の検査だけを行う |
 | 422 | `VALIDATION_FAILED` | `approve` の承認時検証にエラーがある（`issues` を含む） |
 | 500 | `INTERNAL_ERROR` | 想定外のエラー |
 | 503 | `PLANNER_UNAVAILABLE` / `ORCHESTRATOR_UNAVAILABLE` | `planner` / `orchestrator` 職種が未定義、または Planner / Orchestrator を起動できない |
@@ -2490,6 +2541,7 @@ Orchestrator プロセスの終了時に、サーバーは次の順で Workspace
 - **③ 実行**: 同じボードに状態を重ねる。直前計画・リプランで追加された手順と、イレギュラー（ゲート変更）を目立たせる。`waiting_human` のときは、画面上部に次のいずれかのパネルを出す。
   - **レビューパネル**（`human_review`）: レビュー資料（iframe）、自動チェック結果、レビュー観点、節ごとのコメント一覧、**承認して再開** / **差し戻し** ボタン。
   - **「ゲート不合格が続いています」パネル**（`gate_retry_exceeded`）: 不合格のゲートと各 attempt の結果、原因の切り分けの要約、指示欄、**指示を付けて再試行** / **中断** ボタン。
+- **失敗（`failed`）**: 理由と最後の計画を読み取り専用で表示する。`orchestrator_failed` のときは **「再開」パネル**（指示欄（任意）と **再開** ボタン）を上部に出す。`GET /api/workspaces/:id` の `resumable` が `false`（サーバー再起動などで実行時の状態が失われている）のときはボタンを無効にし、「サーバー再起動などで実行時の状態が失われているため再開できません」と表示する。API のエラー（409 など）はパネル内に表示する（§13.8.9）。
 - **④ 完了レポート**: §13.11。
 
 **表示するモデル情報:** 実行環境（Provider: cursor / claude）は画面に出さない。手順やサブ Agent には、モデル名のみを小さく出す。
@@ -2546,7 +2598,7 @@ Workspace は **ファイルに保存し、メモリにもキャッシュする*
   |---|---|
   | `running` / `waiting_human` | `failed` にする（`statusReason`: `{ code: "server_restart", message: "サーバー再起動" }`） |
   | `planning` | Planner のプロセスが失われているため、`revisions` が 1 件以上あれば最後の revision を維持して `review` に戻す。なければ `failed`（`server_restart`） |
-  | `review` / `done` / `failed` / `aborted` | そのまま |
+  | `review` / `done` / `failed` / `aborted` | そのまま（`failed` / `orchestrator_failed` もそのまま残るが、Magentic グループが失われているため再開はできない。§13.8.9） |
 
 - `.kuromajutsu/` は `.gitignore` に追加する。
 - 保存した Workspace の自動削除は行わない（手動で削除する）。

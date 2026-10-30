@@ -249,6 +249,12 @@ describe("WorkspaceService（実行系）", () => {
     await resumed;
     return out;
   };
+  const recoverAndResume = async (...args: Parameters<WorkspaceService["recover"]>): Promise<Workspace> => {
+    const resumed = nextResumed();
+    const out = service.recover(...args);
+    await resumed;
+    return out;
+  };
   const until = async (pred: () => boolean, timeout = 2000): Promise<void> => {
     const start = Date.now();
     while (!pred()) {
@@ -1079,6 +1085,329 @@ describe("WorkspaceService（実行系）", () => {
       // human_review の waiting_human では retry できない
       expect(await codeOfAsync(() => service.retry(id, {}))).toBe("INVALID_STATE");
       expect(await codeOfAsync(() => service.retry("ws-nope", {}))).toBe("NOT_FOUND");
+    });
+  });
+
+  // ----------------------------------------------------
+  // recover（Orchestrator 異常終了 → 再開。§13.8.9）
+  // ----------------------------------------------------
+
+  describe("recover", () => {
+    /** Orchestrator が failure で終了し、failed（orchestrator_failed）になった Workspace */
+    function crashed(errorMessage = "network down") {
+      const r = running();
+      finish(r.orchestratorId, "failure", "失敗", "失敗", errorMessage);
+      expect(current(r.id).status).toBe("failed");
+      expect(current(r.id).statusReason?.code).toBe("orchestrator_failed");
+      return r;
+    }
+
+    it("running にして新しい Orchestrator を同じグループに起動し、workspace:resumed（recover）を出して recoveries に記録する", async () => {
+      const { id, groupId, orchestratorId } = crashed("network down");
+      const failureMessage = current(id).statusReason?.message as string;
+      expect(service.canRecover(id)).toBe(true);
+
+      const out = await recoverAndResume(id, { instruction: "テストから先にやり直して" });
+      expect(out.status).toBe("running");
+      expect(out.statusReason).toBeUndefined();
+
+      const second = orchestratorOf(groupId);
+      expect(second).not.toBe(orchestratorId);
+      expect(manager.getGroup(groupId)?.status).toBe("active");
+      expect(eventsOf("workspace:resumed")).toEqual([
+        { workspaceId: id, reason: "recover", orchestratorAgentId: second },
+      ]);
+
+      const ws = current(id);
+      expect(ws.recoveries).toEqual([
+        {
+          at: expect.any(String),
+          failure: { code: "orchestrator_failed", message: failureMessage },
+          instruction: "テストから先にやり直して",
+        },
+      ]);
+      expect(ws.status).toBe("running");
+    });
+
+    it("指示なしでも再開できる（recoveries に instruction は入らない）", async () => {
+      const { id } = crashed();
+      await recoverAndResume(id, {});
+      const rec = current(id).recoveries ?? [];
+      expect(rec).toHaveLength(1);
+      expect(rec[0]).not.toHaveProperty("instruction");
+      expect(current(id).status).toBe("running");
+    });
+
+    it("再開プロンプトに異常終了の理由と人の指示が入る", async () => {
+      const { id } = crashed("ECONNRESET 接続が切れた");
+      await recoverAndResume(id, { instruction: "build の設定だけ確認して" });
+      const prompt = lastPrompt();
+      expect(prompt).toContain("Orchestrator の異常終了からの再開");
+      expect(prompt).toContain("ECONNRESET 接続が切れた");
+      expect(prompt).toContain("人の指示: build の設定だけ確認して");
+    });
+
+    it("グループ内で動いていたサブ Agent は停止し、完了済みの Agent や Orchestrator は対象にしない", async () => {
+      const { id, groupId } = running();
+      const child = manager.createGroup("実装", "concurrent", groupId);
+      const role = config.roles.find((r) => r.id === "impl-code")!;
+      const busy = manager.startAgent(child.id, role, "実装して");
+      manager.updateAgentState(busy.agentId, { status: "running" });
+      const done = manager.startAgent(child.id, role, "終わった作業");
+      finish(done.agentId);
+      finish(orchestratorOf(groupId), "failure", "失敗", "失敗", "boom");
+      expect(current(id).status).toBe("failed");
+
+      mockKill.mockClear();
+      await recoverAndResume(id, {});
+      const killed = mockKill.mock.calls.map((c) => c[0]);
+      expect(killed).toContain(busy.agentId);
+      expect(killed).not.toContain(done.agentId);
+    });
+
+    it("再開後に Orchestrator が最終ゲート合格で success 終了すると done になる", async () => {
+      const { id, groupId } = crashed();
+      await recoverAndResume(id, {});
+      service.reportGateResult(groupId, "gate-final", 0, true);
+      finish(orchestratorOf(groupId), "success", "## 何が実装されたか\n認証\n\n## 試し方\nnpm test\n\n## 確認しておくと良いこと\nなし");
+      expect(current(id).status).toBe("done");
+      expect(current(id).report).toBeDefined();
+      expect(current(id).recoveries).toHaveLength(1);
+    });
+
+    it("再開した Orchestrator がまた異常終了したら failed（orchestrator_failed）に戻り、再び再開できる", async () => {
+      const { id, groupId } = crashed();
+      await recoverAndResume(id, {});
+      finish(orchestratorOf(groupId), "failure", "また失敗", "また失敗", "boom2");
+      expect(current(id).status).toBe("failed");
+      expect(current(id).statusReason?.code).toBe("orchestrator_failed");
+      expect(service.canRecover(id)).toBe(true);
+      await recoverAndResume(id, { instruction: "もう一度" });
+      expect(current(id).recoveries).toHaveLength(2);
+    });
+
+    it("新しい Orchestrator を起動できなければ failed（orchestrator_failed）", async () => {
+      const { id } = crashed();
+      const saved = config.roles;
+      config.roles = saved.filter((r) => r.id !== "orchestrator");
+      try {
+        // requireOrchestrator は同期で検査されるため、すぐ INVALID ではなく再開の失敗として扱う
+        service.recover(id, {});
+        await until(() => current(id).status === "failed");
+        expect(current(id).statusReason?.code).toBe("orchestrator_failed");
+        expect(current(id).statusReason?.message).toContain("再開できませんでした");
+      } finally {
+        config.roles = saved;
+      }
+    });
+
+    it("orchestrator_failed 以外は INVALID_STATE（max_iterations / server_restart / plan_failed / running / waiting_human / done / aborted）", async () => {
+      // max_iterations
+      const a = running();
+      manager.updateProgressLedger(a.groupId, {
+        isRequestSatisfied: { reason: "r", answer: false },
+        isInLoop: { reason: "r", answer: false },
+        isProgressBeingMade: { reason: "r", answer: true },
+        nextAction: { reason: "r", answer: "a" },
+        instruction: { reason: "r", answer: "i" },
+        iteration: 12,
+      });
+      finish(a.orchestratorId, "failure", "上限", "上限に達した");
+      expect(current(a.id).statusReason?.code).toBe("max_iterations");
+      expect(codeOf(() => service.recover(a.id, {}))).toBe("INVALID_STATE");
+      expect(service.canRecover(a.id)).toBe(false);
+
+      // server_restart
+      const b = running();
+      store.update(b.id, (w) => {
+        w.status = "failed";
+        w.statusReason = { code: "server_restart", message: "サーバー再起動" };
+      });
+      expect(codeOf(() => service.recover(b.id, {}))).toBe("INVALID_STATE");
+      expect(service.canRecover(b.id)).toBe(false);
+
+      // plan_failed
+      const c = store.create({ instruction: "x", workspacePath: projDir });
+      store.update(c.id, (w) => {
+        w.status = "failed";
+        w.statusReason = { code: "plan_failed", message: "計画生成に失敗" };
+      });
+      expect(codeOf(() => service.recover(c.id, {}))).toBe("INVALID_STATE");
+      expect(service.canRecover(c.id)).toBe(false);
+
+      // running
+      const d = running();
+      expect(codeOf(() => service.recover(d.id, {}))).toBe("INVALID_STATE");
+      expect(service.canRecover(d.id)).toBe(false);
+
+      // waiting_human
+      const e = running();
+      autoPassP1(e.groupId);
+      service.requestHumanReview(e.groupId, "gate-P1", `agent:${writerReports(e.groupId, reviewDoc())}`);
+      finish(e.orchestratorId);
+      expect(current(e.id).status).toBe("waiting_human");
+      expect(codeOf(() => service.recover(e.id, {}))).toBe("INVALID_STATE");
+
+      // done / aborted
+      const f = running();
+      service.reportGateResult(f.groupId, "gate-final", 0, true);
+      finish(f.orchestratorId);
+      expect(current(f.id).status).toBe("done");
+      expect(codeOf(() => service.recover(f.id, {}))).toBe("INVALID_STATE");
+      const g = running();
+      service.abort(g.id);
+      expect(codeOf(() => service.recover(g.id, {}))).toBe("INVALID_STATE");
+
+      expect(codeOf(() => service.recover("ws-nope", {}))).toBe("NOT_FOUND");
+      expect(service.canRecover("ws-nope")).toBe(false);
+    });
+
+    it("グループ（実行時の状態）が無ければ INVALID_STATE で、canRecover は false", () => {
+      const { id, groupId } = crashed();
+      expect(service.canRecover(id)).toBe(true);
+      manager.deleteGroup(groupId);
+      expect(service.canRecover(id)).toBe(false);
+      expect(codeOf(() => service.recover(id, {}))).toBe("INVALID_STATE");
+      expect(current(id).status).toBe("failed");
+      expect(current(id).recoveries).toBeUndefined();
+    });
+
+    it("サーバー再起動後（AgentManager が新しい）は再開できない", () => {
+      const { id } = crashed();
+      // 同じ保存ファイルを新しい AgentManager / Service で開き直す
+      const fresh = new AgentManager(config);
+      const store2 = new WorkspaceStore(dir);
+      store2.loadAll();
+      const service2 = new WorkspaceService(config, fresh, store2, {
+        gateRunner: runner,
+        mermaidRuntime: mermaid as () => string | undefined,
+        resumeWait_ms: 30,
+      });
+      expect(service2.canRecover(id)).toBe(false);
+      expect(codeOf(() => service2.recover(id, {}))).toBe("INVALID_STATE");
+    });
+
+    /** 動いている impl-code のサブ Agent を 1 つ作る */
+    function busyAgent(groupId: string): string {
+      const child = manager.createGroup("実装", "concurrent", groupId);
+      const agent = manager.startAgent(child.id, config.roles.find((r) => r.id === "impl-code")!, "実装して");
+      manager.updateAgentState(agent.agentId, { status: "running" });
+      return agent.agentId;
+    }
+
+    it("run_gate_check の実行中に Orchestrator が落ちたら command を止め、recover しても古い結果は記録されない", async () => {
+      const { id, groupId, orchestratorId } = running();
+      runner.hang.add("npm run build");
+      const settled = service.runGateCheck(groupId, "gate-P2").then(
+        () => "resolved",
+        (e) => (e instanceof WorkspaceError ? e.code : "other"),
+      );
+      await until(() => runner.calls.length === 1);
+
+      finish(orchestratorId, "failure", "失敗", "失敗", "network down");
+      expect(current(id).statusReason?.code).toBe("orchestrator_failed");
+      expect(runner.calls[0].opts.signal?.aborted).toBe(true);
+      expect(await settled).toBe("WORKSPACE_NOT_RUNNING");
+
+      await recoverAndResume(id, {});
+      const g = current(id).gateResults.find((x) => x.gateId === "gate-P2")!;
+      expect(g.attempts).toEqual([]);
+      expect(g.status).toBe("pending");
+    });
+
+    it("recover の冒頭でも、残っている実行中のゲート command を止める", async () => {
+      const { id, groupId } = running();
+      runner.hang.add("npm run build");
+      const settled = service.runGateCheck(groupId, "gate-P2").then(
+        () => "resolved",
+        (e) => (e instanceof WorkspaceError ? e.code : "other"),
+      );
+      await until(() => runner.calls.length === 1);
+      // markFailed を通らずに failed になった状態（取りこぼし）を作る
+      store.update(id, (w) => {
+        w.status = "failed";
+        w.statusReason = { code: "orchestrator_failed", message: "取りこぼし" };
+      });
+      await recoverAndResume(id, {});
+      expect(runner.calls[0].opts.signal?.aborted).toBe(true);
+      expect(await settled).toBe("WORKSPACE_NOT_RUNNING");
+      expect(current(id).gateResults.find((x) => x.gateId === "gate-P2")?.attempts).toEqual([]);
+    });
+
+    it("通算の反復回数が maxIterations 以上なら INVALID_STATE（canRecover は false）", () => {
+      const { id, groupId } = crashed();
+      expect(service.canRecover(id)).toBe(true);
+      manager.updateProgressLedger(groupId, {
+        isRequestSatisfied: { reason: "r", answer: false },
+        isInLoop: { reason: "r", answer: false },
+        isProgressBeingMade: { reason: "r", answer: true },
+        nextAction: { reason: "r", answer: "a" },
+        instruction: { reason: "r", answer: "i" },
+        iteration: 12,
+      });
+      expect(service.canRecover(id)).toBe(false);
+      expect(codeOf(() => service.recover(id, {}))).toBe("INVALID_STATE");
+      expect(current(id).status).toBe("failed");
+    });
+
+    it("停止したサブ Agent の終了を待ってから新しい Orchestrator を起動し、再開プロンプトに停止した Agent を渡す", async () => {
+      const { id, groupId } = running();
+      const busy = busyAgent(groupId);
+      manager.updateAgentState(busy, { editedFiles: ["src/partial.ts"] });
+      finish(orchestratorOf(groupId), "failure", "失敗", "失敗", "boom");
+      // kill のあと、少し遅れてプロセスが終了する
+      mockKill.mockImplementation((agentId: string) => {
+        setTimeout(() => manager.updateAgentState(agentId, { status: "failed" }), 10);
+      });
+
+      let statusAtResume: string | undefined;
+      service.once("workspace:resumed", () => {
+        statusAtResume = manager.getAgent(busy)?.status;
+      });
+      await recoverAndResume(id, {});
+      expect(statusAtResume).toBe("failed");
+
+      const prompt = lastPrompt();
+      expect(prompt).toContain("途中で停止したサブ Agent");
+      expect(prompt).toContain(busy);
+      expect(prompt).toContain("src/partial.ts");
+    });
+
+    it("再開直後（旧 Orchestrator・停止したサブ Agent を待っている間）に中断すると、Orchestrator は起動しない", async () => {
+      const { id, groupId } = running();
+      busyAgent(groupId); // 終了しないので resumeWait_ms まで待つ
+      finish(orchestratorOf(groupId), "failure", "失敗", "失敗", "boom");
+      const executed = mockExecute.mock.calls.length;
+
+      const out = service.recover(id, {});
+      expect(out.status).toBe("running");
+      service.abort(id);
+      await new Promise((r) => setTimeout(r, 120));
+
+      expect(current(id).status).toBe("aborted");
+      expect(mockExecute.mock.calls.length).toBe(executed);
+      expect(eventsOf("workspace:resumed")).toHaveLength(0);
+    });
+
+    it("二重に recover すると 2 回目は INVALID_STATE（Orchestrator は 1 つだけ起動する）", async () => {
+      const { id } = crashed();
+      const executed = mockExecute.mock.calls.length;
+      const resumed = nextResumed();
+      service.recover(id, {});
+      expect(codeOf(() => service.recover(id, {}))).toBe("INVALID_STATE");
+      await resumed;
+      expect(mockExecute.mock.calls.length).toBe(executed + 1);
+      expect(current(id).recoveries).toHaveLength(1);
+    });
+
+    it("再開はすぐ返す（Orchestrator の起動を待たない）", async () => {
+      const { id } = crashed();
+      const resumed = nextResumed();
+      const out = service.recover(id, {});
+      expect(out.status).toBe("running");
+      expect(eventsOf("workspace:resumed")).toHaveLength(0);
+      await resumed;
+      expect(eventsOf("workspace:resumed")).toHaveLength(1);
     });
   });
 

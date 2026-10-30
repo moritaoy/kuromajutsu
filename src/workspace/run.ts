@@ -623,6 +623,82 @@ export class WorkspaceRunner {
     return this.require(id);
   }
 
+  /**
+   * `recover` できない理由（できるなら undefined）。サーバー再起動後は Magentic グループ・設定（インメモリ）が
+   * 失われているため、`server_restart` に限らず再開できない（§13.8.9）。
+   */
+  private recoverBlocker(ws: Workspace): string | undefined {
+    if (ws.status !== "failed" || ws.statusReason?.code !== "orchestrator_failed") {
+      return `再開できるのは Orchestrator の異常終了（orchestrator_failed）で失敗した Workspace のみです（現在: ${ws.status}${
+        ws.statusReason ? `, ${ws.statusReason.code}` : ""
+      }）`;
+    }
+    const group = ws.groupId ? this.manager.getGroup(ws.groupId) : undefined;
+    if (!ws.groupId || !group || group.status !== "active" || !this.manager.getMagenticConfig(ws.groupId)) {
+      return "実行時の状態（Magentic グループ・台帳）が失われているため再開できません（サーバーの再起動など）";
+    }
+    // 反復が上限に達していれば、新しい Orchestrator はすぐ上限に当たるため再開しない
+    try {
+      const maxIterations = this.approvedPlan(ws).maxIterations;
+      if (this.iterationsOf(ws.groupId) >= maxIterations) {
+        return `反復が maxIterations（${maxIterations}）に達しているため再開できません`;
+      }
+    } catch {
+      // 計画が無い場合は、再開の処理で失敗として扱う
+    }
+    return undefined;
+  }
+
+  /** `recover` できるか。Workspace が無ければ false */
+  canRecover(id: string): boolean {
+    const ws = this.store.get(id);
+    return ws !== undefined && this.recoverBlocker(ws) === undefined;
+  }
+
+  /**
+   * Orchestrator の異常終了（`failed` / `orchestrator_failed`）からの再開。履歴を記録して `running` にし、
+   * 動いていたサブ Agent を停止して、すぐ返す。新しい Orchestrator の起動は非同期（§13.8.9）。
+   */
+  recover(id: string, input: { instruction?: string }): Workspace {
+    const ws = this.require(id);
+    const blocker = this.recoverBlocker(ws);
+    if (blocker !== undefined) throw new WorkspaceError("INVALID_STATE", blocker);
+    const failure = ws.statusReason?.message ?? "";
+    const groupId = ws.groupId as string;
+    // 念のため、取りこぼした実行中のゲート command があれば止める（古い結果を記録させない）
+    this.abortGateChecks(id);
+    const now = this.deps.now();
+    const instruction =
+      input.instruction !== undefined && input.instruction.trim() !== "" ? input.instruction : undefined;
+
+    this.store.update(id, (w) => {
+      w.recoveries = [
+        ...(w.recoveries ?? []),
+        {
+          at: now,
+          failure: { code: "orchestrator_failed", message: failure },
+          ...(instruction !== undefined ? { instruction } : {}),
+        },
+      ];
+      w.status = "running";
+      delete w.statusReason;
+    });
+
+    // 途中で動いていたサブ Agent は停止する（部分的な成果はディスクに残る）。旧 Orchestrator は resume() が止める
+    const stopped: string[] = [];
+    for (const agent of this.agentsOfRun(groupId)) {
+      if (agent.role === "orchestrator") continue;
+      if (agent.status === "running" || agent.status === "queued") {
+        this.manager.killAgent(agent.agentId);
+        stopped.push(agent.agentId);
+      }
+    }
+
+    // 停止したサブ Agent の終了は、非同期の再開の中で待つ（すぐ返す）
+    this.startResume(id, { kind: "recover", failure, instruction }, stopped);
+    return this.require(id);
+  }
+
   /** イレギュラー（ゲート変更）を確認済みにする */
   ackIrregular(id: string, gateChangeId: string): Workspace {
     const ws = this.require(id);
@@ -645,7 +721,7 @@ export class WorkspaceRunner {
       w.statusReason = { code: "user_abort", message: "ユーザーが中断しました" };
     });
     // 実行中のゲートの command も止める
-    for (const c of this.runs.get(id)?.gateAborts ?? []) c.abort();
+    this.abortGateChecks(id);
     if (ws.groupId) {
       // 完了を報告済みでもプロセスが残っていることがあるため、全 Agent に停止を試みる
       // （killAgent はプロセスが無ければ何もしない）
@@ -753,13 +829,13 @@ export class WorkspaceRunner {
    * 再開プロンプトで新しい Orchestrator を同じ Magentic グループに起動する。
    * 呼び出し時点で Workspace は `running` になっている。失敗したら `failed` にする。
    */
-  private startResume(id: string, reason: ResumeReason): void {
-    this.resume(id, reason).catch((e) => {
+  private startResume(id: string, reason: ResumeReason, waitFor: string[] = []): void {
+    this.resume(id, reason, waitFor).catch((e) => {
       console.error(`[workspace] 再開の処理に失敗しました (${id}): ${errorMessage(e)}`);
     });
   }
 
-  private async resume(id: string, reason: ResumeReason): Promise<void> {
+  private async resume(id: string, reason: ResumeReason, waitFor: string[] = []): Promise<void> {
     // 旧 Orchestrator の完了イベントは処理しない（再開の一部として扱う）
     this.unwatch(id);
     try {
@@ -769,8 +845,13 @@ export class WorkspaceRunner {
       if (!groupId || !group) throw new Error("Magentic グループが見つかりません");
 
       const oldId = group.orchestratorAgentId;
+      // 旧 Orchestrator と、`recover` で停止したサブ Agent（終了前に新しい Orchestrator を起動すると
+      // 同時実行数の上限に当たることがある）の終了を待つ
+      const waitIds = [...(oldId ? [oldId] : []), ...waitFor].filter((x) => this.manager.getAgent(x));
+      if (waitIds.length > 0) {
+        await this.manager.waitForAgents(waitIds, "all", this.deps.resumeWait_ms);
+      }
       if (oldId && this.manager.getAgent(oldId)) {
-        await this.manager.waitForAgents([oldId], "all", this.deps.resumeWait_ms);
         // 終了していなければ停止する。完了を報告済みでもプロセスが残っていれば止める
         this.manager.killAgent(oldId);
       }
@@ -794,6 +875,7 @@ export class WorkspaceRunner {
         plan,
         ledger: this.manager.getLedger(groupId),
         agentSummaries: this.agentSummaries(groupId),
+        stoppedAgents: this.stoppedAgents(groupId),
         reason,
       });
       this.manager.setMagenticConfig(groupId, {
@@ -926,10 +1008,18 @@ export class WorkspaceRunner {
     code: "orchestrator_failed" | "max_iterations",
     message: string,
   ): void {
+    // 実行中のゲートの command も止める（Orchestrator が run_gate_check 待ちで落ちても、
+    // 再開後に古い結果が記録されない。§13.8.9）
+    this.abortGateChecks(id);
     this.store.update(id, (w) => {
       w.status = "failed";
       w.statusReason = { code, message };
     });
+  }
+
+  /** 実行中の `run_gate_check` の command を止める（止めた呼び出しは結果を記録しない） */
+  private abortGateChecks(id: string): void {
+    for (const c of [...(this.runs.get(id)?.gateAborts ?? [])]) c.abort();
   }
 
   /** 通算の反復回数（Progress Ledger の履歴 + 現在、反復番号、MagenticConfig の値の最大） */
@@ -1196,6 +1286,19 @@ export class WorkspaceRunner {
         summary: a.result?.summary ?? "",
         editedFiles: [...(a.result?.editedFiles ?? a.editedFiles)],
         createdFiles: [...(a.result?.createdFiles ?? a.createdFiles)],
+      }));
+  }
+
+  /** 結果を報告しないまま終わった（`recover` で停止した）サブ Agent（Orchestrator 自身は除く） */
+  private stoppedAgents(groupId: string) {
+    return this.agentsOfRun(groupId)
+      .filter((a) => a.result === null && a.role !== "orchestrator")
+      .map((a) => ({
+        agentId: a.agentId,
+        role: a.role,
+        status: a.status,
+        editedFiles: [...a.editedFiles],
+        createdFiles: [...a.createdFiles],
       }));
   }
 

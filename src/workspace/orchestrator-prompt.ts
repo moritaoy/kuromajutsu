@@ -319,7 +319,8 @@ export function buildWorkspaceInjectionBlock(input: WorkspaceInjectionInput): st
 export type ResumeReason =
   | { kind: "approved"; gateId: string }
   | { kind: "changes_requested"; gateId: string; comments: ReviewComment[] }
-  | { kind: "retry"; gateId: string; instruction?: string };
+  | { kind: "retry"; gateId: string; instruction?: string }
+  | { kind: "recover"; failure: string; instruction?: string };
 
 export interface ResumePromptInput {
   workspace: Workspace;
@@ -333,6 +334,17 @@ export interface ResumePromptInput {
     createdFiles: string[];
   }[];
   reason: ResumeReason;
+  /**
+   * 結果を報告しないまま終わった（再開で停止した）サブ Agent（Orchestrator 自身は除く）。
+   * 異常終了からの再開（`recover`）のときだけプロンプトに含める
+   */
+  stoppedAgents?: {
+    agentId: string;
+    role: string;
+    status: string;
+    editedFiles: string[];
+    createdFiles: string[];
+  }[];
 }
 
 function formatComment(c: ReviewComment): string {
@@ -345,12 +357,13 @@ function nextReviewVersion(workspace: Workspace, gateId: string): number {
   return (versions.length > 0 ? Math.max(...versions) : 0) + 1;
 }
 
-/** 人からの指示（再試行のとき。引数の指示、なければ `retryInstructions` の最新） */
+/** 人からの指示（再試行・異常終了からの再開のとき。引数の指示、再試行ならなければ `retryInstructions` の最新） */
 function humanInstruction(input: ResumePromptInput): string | undefined {
-  if (input.reason.kind !== "retry") return undefined;
+  if (input.reason.kind !== "retry" && input.reason.kind !== "recover") return undefined;
   if (input.reason.instruction !== undefined && input.reason.instruction.trim() !== "") {
     return input.reason.instruction;
   }
+  if (input.reason.kind === "recover") return undefined;
   const gateId = input.reason.gateId;
   const result = input.workspace.gateResults.find((g) => g.gateId === gateId);
   const list = result?.retryInstructions ?? [];
@@ -365,6 +378,8 @@ function reasonHeadline(reason: ResumeReason): string {
       return `人間レビューの差し戻し（対象ゲート: ${reason.gateId}）`;
     case "retry":
       return `差し戻し上限超過後の再試行（対象ゲート: ${reason.gateId}）`;
+    case "recover":
+      return "Orchestrator の異常終了からの再開";
   }
 }
 
@@ -377,13 +392,147 @@ function runtimeView(input: ResumePromptInput): { phases: Phase[]; steps: Schedu
   };
 }
 
+/** 差し戻された人間レビューの次の行動（差し戻しからの再開、未対応の差し戻しの引き継ぎで共用） */
+function changesRequestedActions(input: ResumePromptInput, gateId: string, comments: ReviewComment[]): string[] {
+  const { phases, steps } = runtimeView(input);
+  const gate = steps.find((s) => s.stepId === gateId);
+  const phase = gate?.phaseId ? phases.find((p) => p.id === gate.phaseId) : undefined;
+  const phaseLabel = phase ? `${phase.id}「${phase.name}」` : "（該当フェーズ）";
+  const version = nextReviewVersion(input.workspace, gateId);
+  return [
+    `${phaseLabel} の出口ゲート ${gateId} は人間レビューで差し戻されました。次の順に進めてください。`,
+    "",
+    "差し戻しコメント（節 ID 付き）:",
+    ...comments.map((c) => `- ${formatComment(c)}`),
+    "",
+    '1. そのフェーズに「レビュー指摘の反映」手順を追加し（`update_ledger(type: "task", phases, scheduledSteps)`。ゲートは変えない）、サブ Agent に実行させる。',
+    `2. ゲート ${gateId} の自動チェック（\`command\` は \`run_gate_check(groupId, gateId)\`、\`agent-review\` はレビュー職種の起動 + \`report_gate_result\`）をやり直す。不合格なら通常の不合格時の原則に従う。`,
+    `3. \`text-writer\` に **次の版**（version: ${version}）のレビュー資料を作らせる。先頭の \`previousFeedback\` に、上記コメントそれぞれへの対応（直した内容、直さない場合はその理由）を書かせる。`,
+    `4. \`request_human_review(groupId, gateId: "${gateId}", reviewDocPath: "agent:<text-writer の agentId>")\` を呼び、`,
+    '   `report_result(status: "success", summary: "人間レビュー待ちで一時停止")` で終了する。',
+    "",
+    "人間レビューの差し戻しは maxRetries に数えない。",
+  ];
+}
+
+/** 差し戻し上限超過後の再試行の次の行動（再試行からの再開、未対応の再試行の引き継ぎで共用） */
+function retryActions(gateId: string, instruction: string | undefined): string[] {
+  return [
+    `ゲート ${gateId} は不合格が続き、差し戻し上限を超えて停止していました。人が指示を付けて再試行を選びました。`,
+    "このゲートの失敗回数は 0 に戻っています。",
+    "",
+    `人の指示: ${instruction ?? "（指示なし）"}`,
+    "",
+    "1. 人の指示を踏まえて、**原因の切り分けからやり直す**（そのフェーズに「原因の切り分け」手順を追加し、レビュー職種に依頼する。自分で調査・修正しない）。",
+    "2. 報告を読んで、直す場所（同じフェーズ / 修正フェーズ）を決め、修正手順をサブ Agent に実行させる。",
+    `3. ゲート ${gateId} を同じ条件で再チェックする。`,
+    '4. 再び `retryLimitExceeded: true` が返ったら、`report_result(status: "success", summary: "差し戻し上限超過で一時停止")` で終了する。',
+  ];
+}
+
+/**
+ * 異常終了の前に始まっていた再開（人間レビューの差し戻し・再試行）のうち、まだ対応が始まっていないもの。
+ * `orchestrator_failed` は再開時の起動失敗でも付くため、元の再開理由を状態から復元する。
+ */
+function pendingResumes(workspace: Workspace): {
+  changeRequests: { gateId: string; comments: ReviewComment[] }[];
+  retries: { gateId: string; text: string }[];
+} {
+  const changeRequests: { gateId: string; comments: ReviewComment[] }[] = [];
+  const gateIds = [...new Set(workspace.humanReviews.map((r) => r.gateId))];
+  for (const gateId of gateIds) {
+    const reviews = workspace.humanReviews.filter((r) => r.gateId === gateId);
+    const latest = reviews.reduce((a, b) => (b.version > a.version ? b : a));
+    if (latest.status === "changes_requested") changeRequests.push({ gateId, comments: latest.comments });
+  }
+
+  const retries: { gateId: string; text: string }[] = [];
+  for (const g of workspace.gateResults) {
+    const last = g.retryInstructions[g.retryInstructions.length - 1];
+    if (!last) continue;
+    const maxAttempt = g.attempts.reduce((m, a) => Math.max(m, a.attempt), 0);
+    if (maxAttempt <= (last.afterAttempt ?? 0)) retries.push({ gateId: g.gateId, text: last.text });
+  }
+  return { changeRequests, retries };
+}
+
+/** ゲートの状態別の一覧（未対応の再開があるゲートは除く）。まだ着手していない pending は含めない */
+function gateBuckets(workspace: Workspace, skip: Set<string>): { failed: string[]; autoPassed: string[]; partial: string[] } {
+  const out = { failed: [] as string[], autoPassed: [] as string[], partial: [] as string[] };
+  for (const g of workspace.gateResults) {
+    if (skip.has(g.gateId)) continue;
+    const last = g.attempts[g.attempts.length - 1];
+    if (g.status === "failed") out.failed.push(g.gateId);
+    else if (g.status === "auto_passed") out.autoPassed.push(g.gateId);
+    else if (g.status === "pending" && last && last.closedAt === undefined) out.partial.push(g.gateId);
+  }
+  return out;
+}
+
+/** 異常終了からの再開: 特定のゲートに紐付かないため、台帳（Task / Progress Ledger）とゲートの状態から続きを判断させる */
+function recoverActions(input: ResumePromptInput, failure: string, instruction: string | undefined): string[] {
+  const { workspace } = input;
+  const pending = pendingResumes(workspace);
+  const handled = new Set([...pending.changeRequests.map((c) => c.gateId), ...pending.retries.map((r) => r.gateId)]);
+  const buckets = gateBuckets(workspace, handled);
+
+  const lines = [
+    `前の Orchestrator は異常終了しました（理由: ${failure}）。`,
+    "途中で動いていたサブ Agent は停止済みです（上記「途中で停止したサブ Agent」）。その成果は部分的にディスクに残っている可能性があります。",
+    "",
+    ...(instruction !== undefined ? [`人の指示: ${instruction}`, ""] : []),
+    "1. Task Ledger・Progress Ledger・サブ Agent の結果（上記）を見て、**完了していない最初の手順** から続ける。完了済みの作業はやり直さない。",
+    '2. 途中だった手順（停止したサブ Agent の手順）は、同じ手順をやり直させるか、成果を確認するレビュー手順を挟んでから先へ進める。手順の追加は `update_ledger(type: "task", phases, scheduledSteps)` で行う（ゲートは変えない）。自分では作業しない原則は変えない。',
+    "3. ゲートの状態は **サーバーの記録を正** とする（上記のゲート結果）。状態ごとに次のとおり進める。",
+  ];
+
+  const gateLines: string[] = [];
+  if (buckets.failed.length > 0) {
+    gateLines.push(
+      `   - 不合格（failed）: ${buckets.failed.join(", ")} — 修正の手順（原因の切り分け / 修正フェーズ）を続け、修正が終わってから同じ条件で再チェックする。修正の前に再チェックしない。`,
+    );
+  }
+  if (buckets.autoPassed.length > 0) {
+    gateLines.push(
+      `   - 自動チェック合格・人間レビュー前（auto_passed）: ${buckets.autoPassed.join(", ")} — 自動チェックはやり直さない。\`text-writer\` にレビュー資料を作らせ、\`request_human_review(groupId, gateId, reviewDocPath: "agent:<text-writer の agentId>")\` を呼んで、\`report_result(status: "success", summary: "人間レビュー待ちで一時停止")\` で終了する。`,
+    );
+  }
+  if (buckets.partial.length > 0) {
+    gateLines.push(
+      `   - 途中の attempt（pending）: ${buckets.partial.join(", ")} — 同じ条件で再チェックする（\`command\` は \`run_gate_check(groupId, gateId)\`、\`agent-review\` はレビュー職種の起動 + \`report_gate_result\`）。`,
+    );
+  }
+  lines.push(...(gateLines.length > 0 ? gateLines : ["   - 途中のゲートはありません。通常どおり、手順が終わったフェーズの出口ゲートをチェックする。"]));
+  lines.push(
+    '4. 最終ゲートが合格済みで残りの手順が無ければ、完了条件を確認し、`report_result(status: "success")` で最終報告をする（`response` は Markdown で、見出し `## 何が実装されたか` / `## 試し方` / `## 確認しておくと良いこと`）。',
+  );
+
+  for (const c of pending.changeRequests) {
+    lines.push(
+      "",
+      `【未対応の人間レビューの差し戻し — ゲート ${c.gateId}】`,
+      "異常終了の前に人間レビューが差し戻されていましたが、その対応はまだ始まっていません（再開に失敗していた可能性があります）。上の 3 よりこちらを先に行ってください。",
+      ...changesRequestedActions(input, c.gateId, c.comments),
+    );
+  }
+  for (const r of pending.retries) {
+    lines.push(
+      "",
+      `【未対応の再試行の指示 — ゲート ${r.gateId}】`,
+      "異常終了の前に人が再試行の指示を出していましたが、その後の attempt はまだありません（再開に失敗していた可能性があります）。上の 3 よりこちらを先に行ってください。",
+      ...retryActions(r.gateId, r.text.trim() !== "" ? r.text : undefined),
+    );
+  }
+  return lines;
+}
+
 function nextActions(input: ResumePromptInput): string[] {
-  const { workspace, plan, reason } = input;
+  const { plan, reason } = input;
+  if (reason.kind === "recover") return recoverActions(input, reason.failure, humanInstruction(input));
   const { phases, steps } = runtimeView(input);
   const gateId = reason.gateId;
   const gate = steps.find((s) => s.stepId === gateId);
   const phase = gate?.phaseId ? phases.find((p) => p.id === gate.phaseId) : undefined;
-  const phaseLabel = phase ? `${phase.id}「${phase.name}」` : "（該当フェーズ）";
   const finalPhaseId = phases.find((p) => p.final)?.id;
   const finalGateId =
     (finalPhaseId ? steps.find((s) => s.kind === "gate" && s.phaseId === finalPhaseId)?.stepId : undefined) ??
@@ -424,37 +573,10 @@ function nextActions(input: ResumePromptInput): string[] {
       }
       return lines;
     }
-    case "changes_requested": {
-      const version = nextReviewVersion(workspace, gateId);
-      return [
-        `${phaseLabel} の出口ゲート ${gateId} は人間レビューで差し戻されました。次の順に進めてください。`,
-        "",
-        "差し戻しコメント（節 ID 付き）:",
-        ...reason.comments.map((c) => `- ${formatComment(c)}`),
-        "",
-        '1. そのフェーズに「レビュー指摘の反映」手順を追加し（`update_ledger(type: "task", phases, scheduledSteps)`。ゲートは変えない）、サブ Agent に実行させる。',
-        `2. ゲート ${gateId} の自動チェック（\`command\` は \`run_gate_check(groupId, gateId)\`、\`agent-review\` はレビュー職種の起動 + \`report_gate_result\`）をやり直す。不合格なら通常の不合格時の原則に従う。`,
-        `3. \`text-writer\` に **次の版**（version: ${version}）のレビュー資料を作らせる。先頭の \`previousFeedback\` に、上記コメントそれぞれへの対応（直した内容、直さない場合はその理由）を書かせる。`,
-        `4. \`request_human_review(groupId, gateId: "${gateId}", reviewDocPath: "agent:<text-writer の agentId>")\` を呼び、`,
-        '   `report_result(status: "success", summary: "人間レビュー待ちで一時停止")` で終了する。',
-        "",
-        "人間レビューの差し戻しは maxRetries に数えない。",
-      ];
-    }
-    case "retry": {
-      const instruction = humanInstruction(input);
-      return [
-        `ゲート ${gateId} は不合格が続き、差し戻し上限を超えて停止していました。人が指示を付けて再試行を選びました。`,
-        "このゲートの失敗回数は 0 に戻っています。",
-        "",
-        `人の指示: ${instruction ?? "（指示なし）"}`,
-        "",
-        "1. 人の指示を踏まえて、**原因の切り分けからやり直す**（そのフェーズに「原因の切り分け」手順を追加し、レビュー職種に依頼する。自分で調査・修正しない）。",
-        "2. 報告を読んで、直す場所（同じフェーズ / 修正フェーズ）を決め、修正手順をサブ Agent に実行させる。",
-        `3. ゲート ${gateId} を同じ条件で再チェックする。`,
-        '4. 再び `retryLimitExceeded: true` が返ったら、`report_result(status: "success", summary: "差し戻し上限超過で一時停止")` で終了する。',
-      ];
-    }
+    case "changes_requested":
+      return changesRequestedActions(input, reason.gateId, reason.comments);
+    case "retry":
+      return retryActions(reason.gateId, humanInstruction(input));
   }
 }
 
@@ -503,6 +625,7 @@ function progressLedgerLines(ledger?: MagenticLedger): string[] {
  */
 export function buildResumePrompt(input: ResumePromptInput): string {
   const { workspace, plan, ledger, agentSummaries, reason } = input;
+  const stoppedAgents = input.stoppedAgents ?? [];
   const spec = plan.spec;
   const instruction = humanInstruction(input);
 
@@ -558,11 +681,25 @@ export function buildResumePrompt(input: ResumePromptInput): string {
       : ["（なし）"]),
   ]);
 
+  const stoppedBlock =
+    reason.kind === "recover"
+      ? block("再開時の状態 5 — 途中で停止したサブ Agent（結果を報告していない）", [
+          ...(stoppedAgents.length > 0
+            ? stoppedAgents.flatMap((a) => [
+                `- ${a.agentId}（${a.role}、状態: ${a.status}）`,
+                `    途中までに編集したファイル: ${a.editedFiles.length > 0 ? a.editedFiles.join(", ") : "（なし）"}`,
+                `    途中までに作成したファイル: ${a.createdFiles.length > 0 ? a.createdFiles.join(", ") : "（なし）"}`,
+              ])
+            : ["（なし）"]),
+        ])
+      : "";
+
   const humanBlock = block("人からの指示", [instruction ?? "（なし）"]);
 
   const nextBlock = block("次にやること", nextActions(input));
 
-  return [intro, workspaceBlock, ledgerBlock, gateBlock, agentBlock, humanBlock, nextBlock]
+  return [intro, workspaceBlock, ledgerBlock, gateBlock, agentBlock, stoppedBlock, humanBlock, nextBlock]
+    .filter((b) => b !== "")
     .join("\n")
     .replace(/^\n+/, "");
 }

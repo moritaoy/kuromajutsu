@@ -226,6 +226,16 @@ export class WorkspaceService extends EventEmitter {
     return this.runner.retry(id, input);
   }
 
+  /** Orchestrator の異常終了（failed / orchestrator_failed）から、指示を付けて再開する（すぐ返す。再開は非同期） */
+  recover(id: string, input: { instruction?: string } = {}): Workspace {
+    return this.runner.recover(id, input);
+  }
+
+  /** `recover` できるか（Magentic グループ・設定がサーバーのメモリに残っている orchestrator_failed のみ） */
+  canRecover(id: string): boolean {
+    return this.runner.canRecover(id);
+  }
+
   /** サーバーの終了時: 実行中のゲートの command を中断する */
   shutdown(): void {
     this.runner.shutdown();

@@ -78,6 +78,12 @@ export const workspaceApi = {
     if (instruction && instruction.trim()) body.instruction = instruction;
     return request("POST", `/${enc(id)}/retry`, body);
   },
+  /** Orchestrator の異常終了（orchestrator_failed）からの再開（spec §13.8.9） */
+  resume: (id, { instruction } = {}) => {
+    const body = {};
+    if (instruction && instruction.trim()) body.instruction = instruction;
+    return request("POST", `/${enc(id)}/resume`, body);
+  },
   ack: (id, gateChangeId) => request("POST", `/${enc(id)}/irregulars/${enc(gateChangeId)}/ack`, {}),
   abort: (id) => request("POST", `/${enc(id)}/abort`, {}),
   /** レビュー資料の URL。`file` は `reviews/` を除いた相対パス（`..` は不可） */
