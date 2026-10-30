@@ -92,6 +92,25 @@ function listCommandLabel(provider: AgentProvider): string {
   return cmd ? `${cmd.command} ${cmd.args.join(" ")}` : `${provider.id} models`;
 }
 
+/**
+ * items を最大 limit 件ずつ並列に処理する。
+ * 1 件終わるごとに次の 1 件を開始する（ワーカープール方式）。
+ */
+async function runWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      await fn(items[next++]);
+    }
+  };
+  const workers = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: workers }, worker));
+}
+
 // --------------------------------------------------
 // HealthChecker
 // --------------------------------------------------
@@ -103,6 +122,7 @@ function listCommandLabel(provider: AgentProvider): string {
  * 1. 使用中の Provider ごとに利用可能モデル一覧を取得（cursor: `agent models` / claude: 静的一覧）
  * 2. 各職種のモデルを、その職種の Provider の一覧と照合（モデル検証）
  * 3. モデル検証通過済み職種に `healthCheckPrompt` を Provider の CLI で実行
+ *    （`agent.maxConcurrent` を上限に並列実行。結果は職種の定義順のまま）
  * 4. 結果を HealthCheckResult[] として返却
  */
 export class HealthChecker {
@@ -132,10 +152,9 @@ export class HealthChecker {
 
     // 1. 使用中の Provider ごとに利用可能モデル一覧を取得
     const modelsByProvider = new Map<AgentProviderId, string[] | null>();
-    const usedProviders = new Set(this.config.roles.map((r) => resolveProviderId(r)));
-    for (const providerId of usedProviders) {
-      modelsByProvider.set(providerId, await this.getAvailableModels(providerId));
-    }
+    const usedProviders = [...new Set(this.config.roles.map((r) => resolveProviderId(r)))];
+    const modelLists = await Promise.all(usedProviders.map((id) => this.getAvailableModels(id)));
+    usedProviders.forEach((id, i) => modelsByProvider.set(id, modelLists[i]));
 
     // 利用可能モデル一覧を公開プロパティに保存
     this.availableModelsByProvider = { cursor: [], claude: [] };
@@ -166,64 +185,15 @@ export class HealthChecker {
       );
     }
 
-    // 3. モデル検証通過済み職種にヘルスチェックプロンプトを実行
-    for (const result of results) {
-      if (result.modelValidation.status !== "valid") {
-        // モデル検証失敗 → スキップ
-        continue;
-      }
-
+    // 3. モデル検証通過済み職種にヘルスチェックプロンプトを実行（maxConcurrent を上限に並列）
+    const targets = results.flatMap((result) => {
+      if (result.modelValidation.status !== "valid") return []; // モデル検証失敗 → スキップ
       const role = this.config.roles.find((r) => r.id === result.roleId);
-      if (!role) continue;
-
-      // コールバック: チェック開始
-      callbacks?.onRoleCheckStart?.(role.id);
-
-      // ヘルスチェックプロンプト実行
-      const healthResult = await this.runHealthCheckPrompt(role);
-
-      // 結果を反映
-      result.healthCheck = healthResult.healthCheck;
-      result.available = healthResult.available;
-
-      // ツール可用性チェック（role に tools が設定されている場合）
-      if (result.available && role.tools && role.tools.length > 0) {
-        const toolChecks = await this.checkRoleTools(role);
-        result.toolChecks = toolChecks;
-
-        const failedTools = toolChecks.filter((t) => t.status === "failed");
-        if (failedTools.length > 0) {
-          result.available = false;
-          result.healthCheck = {
-            status: "failed",
-            reason: `ツールチェック失敗: ${failedTools.map((t) => `${t.toolId} (${t.reason})`).join(", ")}`,
-            responseTime_ms: result.healthCheck.responseTime_ms,
-            checkedAt: result.healthCheck.checkedAt,
-          };
-        }
-
-        // ツールチェック結果のコンソール出力
-        for (const tc of toolChecks) {
-          const icon = tc.status === "passed" ? "✅" : "❌";
-          console.error(
-            `[health]     ${icon} ツール: ${tc.toolId} — ${tc.status}${tc.reason ? ` (${tc.reason})` : ""}`,
-          );
-        }
-      }
-
-      // コールバック: チェック完了
-      callbacks?.onRoleCheckComplete?.(result);
-
-      // コンソール出力
-      const icon = result.healthCheck.status === "passed" ? "✅" : "❌";
-      const time =
-        result.healthCheck.responseTime_ms !== undefined
-          ? ` (${result.healthCheck.responseTime_ms}ms)`
-          : "";
-      console.error(
-        `[health]   ${icon} ${result.roleId} — ヘルスチェック: ${result.healthCheck.status}${time}`,
-      );
-    }
+      return role ? [{ result, role }] : [];
+    });
+    await runWithConcurrency(targets, this.config.agent.maxConcurrent, ({ result, role }) =>
+      this.checkRole(result, role, callbacks),
+    );
 
     // 4. 完了サマリ
     const availableCount = results.filter((r) => r.available).length;
@@ -240,6 +210,64 @@ export class HealthChecker {
   // ==================================================
   // 内部メソッド
   // ==================================================
+
+  /**
+   * モデル検証通過済みの 1 職種に対してヘルスチェックプロンプトとツールチェックを実行し、
+   * 結果を result に反映する。
+   */
+  private async checkRole(
+    result: HealthCheckResult,
+    role: RoleDefinition,
+    callbacks?: HealthCheckCallbacks,
+  ): Promise<void> {
+    // コールバック: チェック開始
+    callbacks?.onRoleCheckStart?.(role.id);
+
+    // ヘルスチェックプロンプト実行
+    const healthResult = await this.runHealthCheckPrompt(role);
+
+    // 結果を反映
+    result.healthCheck = healthResult.healthCheck;
+    result.available = healthResult.available;
+
+    // ツール可用性チェック（role に tools が設定されている場合）
+    if (result.available && role.tools && role.tools.length > 0) {
+      const toolChecks = await this.checkRoleTools(role);
+      result.toolChecks = toolChecks;
+
+      const failedTools = toolChecks.filter((t) => t.status === "failed");
+      if (failedTools.length > 0) {
+        result.available = false;
+        result.healthCheck = {
+          status: "failed",
+          reason: `ツールチェック失敗: ${failedTools.map((t) => `${t.toolId} (${t.reason})`).join(", ")}`,
+          responseTime_ms: result.healthCheck.responseTime_ms,
+          checkedAt: result.healthCheck.checkedAt,
+        };
+      }
+
+      // ツールチェック結果のコンソール出力
+      for (const tc of toolChecks) {
+        const icon = tc.status === "passed" ? "✅" : "❌";
+        console.error(
+          `[health]     ${icon} ${role.id} ツール: ${tc.toolId} — ${tc.status}${tc.reason ? ` (${tc.reason})` : ""}`,
+        );
+      }
+    }
+
+    // コールバック: チェック完了
+    callbacks?.onRoleCheckComplete?.(result);
+
+    // コンソール出力
+    const icon = result.healthCheck.status === "passed" ? "✅" : "❌";
+    const time =
+      result.healthCheck.responseTime_ms !== undefined
+        ? ` (${result.healthCheck.responseTime_ms}ms)`
+        : "";
+    console.error(
+      `[health]   ${icon} ${result.roleId} — ヘルスチェック: ${result.healthCheck.status}${time}`,
+    );
+  }
 
   /**
    * Provider の利用可能モデル一覧を取得する。

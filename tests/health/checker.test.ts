@@ -657,6 +657,76 @@ describe("HealthChecker", () => {
   });
 
   // ==================================================
+  // 並列実行
+  // ==================================================
+
+  describe("並列実行", () => {
+    /** 職種を n 件持つ設定を作る */
+    function configWithRoles(n: number, maxConcurrent: number): AppConfig {
+      const base = createTestConfig().roles[0];
+      return createTestConfig({
+        agent: { defaultTimeout_ms: 300_000, maxConcurrent },
+        roles: Array.from({ length: n }, (_, i) => ({ ...base, id: `role-${i}` })),
+      });
+    }
+
+    /** ヘルスチェックプロンプトの同時実行数を記録するランナー */
+    function createConcurrencyTrackingRunner(delayFor: (prompt: string, index: number) => number) {
+      const stats = { inFlight: 0, maxInFlight: 0 };
+      let callIndex = 0;
+      const runner = createMockRunner({
+        execCommand: vi.fn().mockImplementation(async (_cmd: string, args: string[]) => {
+          if (args[0] === "models") {
+            return { stdout: "claude-4-sonnet - Claude 4 Sonnet\n", exitCode: 0 };
+          }
+          const index = callIndex++;
+          stats.inFlight++;
+          stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+          await new Promise((r) => setTimeout(r, delayFor(args[args.length - 1], index)));
+          stats.inFlight--;
+          return { stdout: "OK", exitCode: 0 };
+        }),
+      });
+      return { runner, stats };
+    }
+
+    it("複数職種のヘルスチェックプロンプトを同時に実行する", async () => {
+      const { runner, stats } = createConcurrencyTrackingRunner(() => 20);
+      const checker = new HealthChecker(configWithRoles(3, 10), runner);
+
+      const results = await checker.runAll();
+
+      expect(stats.maxInFlight).toBe(3);
+      expect(results.every((r) => r.available)).toBe(true);
+    });
+
+    it("同時実行数は agent.maxConcurrent を超えない", async () => {
+      const { runner, stats } = createConcurrencyTrackingRunner(() => 10);
+      const checker = new HealthChecker(configWithRoles(5, 2), runner);
+
+      const results = await checker.runAll();
+
+      expect(stats.maxInFlight).toBe(2);
+      expect(results).toHaveLength(5);
+      expect(results.every((r) => r.healthCheck.status === "passed")).toBe(true);
+    });
+
+    it("完了順に関わらず結果は職種の定義順で返す", async () => {
+      // 先に始まった職種ほど遅く終わる
+      const { runner } = createConcurrencyTrackingRunner((_p, i) => (3 - i) * 15);
+      const completed: string[] = [];
+      const checker = new HealthChecker(configWithRoles(3, 10), runner);
+
+      const results = await checker.runAll({
+        onRoleCheckComplete: (r) => completed.push(r.roleId),
+      });
+
+      expect(results.map((r) => r.roleId)).toEqual(["role-0", "role-1", "role-2"]);
+      expect(completed).toEqual(["role-2", "role-1", "role-0"]);
+    });
+  });
+
+  // ==================================================
   // ツール可用性チェック
   // ==================================================
 

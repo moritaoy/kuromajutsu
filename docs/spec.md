@@ -1181,7 +1181,7 @@ sequenceDiagram
     CLI-->>Server: モデル一覧
     Server->>UI: モデル検証結果を送信
 
-    loop 各職種（モデル検証通過済み）
+    par 各職種（モデル検証通過済み・agent.maxConcurrent を上限に並列）
         Server->>UI: 職種チェック開始通知
         Server->>CLI: {provider の CLI} -p --model {model} "{healthCheckPrompt}"
         CLI-->>Server: レスポンス
@@ -1209,9 +1209,10 @@ sequenceDiagram
    # claude
    claude -p "{role.healthCheckPrompt}" --model "{role.model}"
    ```
-2. 正常にレスポンスが返ればチェック通過とする
-3. 結果をコンソールと UI にリアルタイムでレポートする（成功/失敗、応答時間）
-4. すべてのチェック完了後にサマリを出力する
+2. 職種ごとのチェックは並列に実行する。同時実行数の上限は `agent.maxConcurrent` とし、1 職種終わるごとに次の職種を開始する。Provider ごとのモデル一覧取得も並列に行う
+3. 正常にレスポンスが返ればチェック通過とする
+4. 結果をコンソールと UI にリアルタイムでレポートする（成功/失敗、応答時間）。通知は完了した順に届くが、返却する結果配列は職種の定義順とする
+5. すべてのチェック完了後にサマリを出力する
 
 ### 7.4 ヘルスチェック結果の構造
 
